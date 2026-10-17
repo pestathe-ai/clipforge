@@ -3,21 +3,19 @@
 Editor video open source per Android e iOS, in stile CapCut. È scritto in
 Flutter e usa FFmpeg per l'esportazione.
 
-## Cosa fa (v0.1)
+## Cosa fa (v0.2)
 
-- **Clip**: importi più video dalla galleria e li metti in fila sulla timeline.
-- **Montaggio**: puoi dividere una clip alla testina, tagliarne inizio e fine,
-  spostarla a destra o a sinistra ed eliminarla.
-- **Velocità**: da 0,5× a 2×, e l'audio segue la velocità.
-- **Filtri**: B/N, Seppia, Vivace, Contrasto, Freddo. Li vedi già
-  nell'anteprima.
-- **Testi**: scegli colore, dimensione, posizione e sfondo, e decidi da che
-  secondo a che secondo restano visibili.
-- **Musica**: aggiungi un brano di sottofondo con il suo volume. Se è più corto
-  del video riparte da capo.
-- **Formati**: 9:16, 1:1 o 16:9. Le clip vengono adattate con bande nere.
-- **Export**: MP4 H.264/AAC a 1080p e 30 fps, salvato nella galleria
-  nell'album "ClipForge".
+- **Timeline in stile CapCut**: la testina resta fissa al centro e la timeline scorre sotto. Le clip mostrano le miniature dei fotogrammi. Con due dita fai lo zoom, tenendo premuto trascini una clip per spostarla, con le maniglie bianche tagli inizio e fine.
+- **Montaggio**: dividi alla testina, duplica, elimina, cambia la velocità da 0,5× a 2×, regola il volume. Annulla e ripeti sono illimitati e il salvataggio è automatico.
+- **Transizioni** (12 tipi): dissolvenza, nero, bianco, scorrimento, tendina, cerchio, zoom, pixel, sfocatura, schiaccia. Le tocchi dal quadratino tra due clip e puoi applicarle a tutte le clip in una volta.
+- **Effetti** (10): zoom lento avanti e indietro, tremolio, glitch, VHS, vignetta, specchio, sfocato, flash.
+- **Filtri** (9): B/N, seppia, vivace, contrasto, freddo, caldo, sbiadito, noir.
+- **Testi**: stili rapidi, colori, sfondo e contorno, animazioni di entrata e uscita. Li sposti, ingrandisci e ruoti col dito direttamente sull'anteprima.
+- **Sticker**: 64 emoji animate.
+- **Sottotitoli automatici**: Whisper gira sul telefono, offline, in 6 lingue. I sottotitoli si correggono come testi e puoi applicare lo stesso stile a tutti.
+- **Musica**: volume, ripetizione automatica se il brano è corto, dissolvenza finale.
+- **Formati**: 9:16, 1:1, 16:9 e 4:5, con sfondo sfocato, nero o bianco ai lati.
+- **Export**: MP4 1080p a 30 fps, salvato in galleria nell'album "ClipForge". Testi e sticker escono identici all'anteprima.
 
 ## Avvio rapido
 
@@ -58,6 +56,8 @@ concatenazione si aggiungono `drawtext` per ogni testo (con `textfile`, che
 evita i problemi di escape) e `amix` con la musica.
 
 ## Limiti noti e prossimi passi
+
+- Nell'anteprima le transizioni sono un taglio netto: le vedi solo nel video esportato.
 
 - Nell'anteprima la musica parte con il video, ma la sincronizzazione è
   approssimativa. L'export invece è preciso.
