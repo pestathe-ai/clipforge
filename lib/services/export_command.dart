@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import '../models/project.dart';
 
 /// Immagine PNG già renderizzata di un [VideoOverlay] (testo, sticker o
@@ -15,15 +17,15 @@ class RenderedOverlay {
 /// È codice Dart puro (niente plugin), così si testa con `flutter test` e
 /// la CI esegue il comando generato con un FFmpeg vero.
 ///
-/// Per ogni clip: taglio → velocità → adattamento al formato (con sfondo
-/// nero/bianco/sfocato) → filtro colore → effetto. Poi le clip vengono unite
-/// a coppie con `xfade`/`acrossfade` (transizione) o `concat`, si
-/// sovrappongono testi/sticker animati e si mixa la musica.
+/// Ordine dei livelli: clip principali (con transizioni) → sovrapposizioni
+/// video/foto (PiP) → testi, sticker e sottotitoli. Audio: clip + musica +
+/// voci fuori campo / suoni + audio delle sovrapposizioni.
 class ExportCommand {
   ExportCommand({
     required this.project,
     required this.outputPath,
     this.overlays = const [],
+    this.pipMasks = const {},
     this.fps = 30,
     this.preset = 'veryfast',
   });
@@ -31,6 +33,10 @@ class ExportCommand {
   final Project project;
   final String outputPath;
   final List<RenderedOverlay> overlays;
+
+  /// Indice della sovrapposizione → PNG in scala di grigi della maschera
+  /// (bianco = visibile), già alla dimensione in pixel del livello.
+  final Map<int, String> pipMasks;
   final int fps;
   final String preset;
 
@@ -48,15 +54,37 @@ class ExportCommand {
     // ── 1) Ogni clip → [v{i}] e [a{i}] ──────────────────────────────
     for (var i = 0; i < p.clips.length; i++) {
       final c = p.clips[i];
-      args.addAll(['-i', c.path]);
-      final vi = input++;
-      final start = _n(c.trimStart), end = _n(c.trimEnd);
-      final speed = c.speed.clamp(0.5, 2.0).toStringAsFixed(3);
       final dur = c.outputDuration.inMicroseconds / 1e6;
       final frames = (dur * fps).round().clamp(1, 1 << 30);
+      final speed = c.speed.clamp(0.5, 2.0).toStringAsFixed(3);
 
-      final chain = StringBuffer(
-          '[$vi:v]trim=start=$start:end=$end,setpts=(PTS-STARTPTS)/$speed,fps=$fps');
+      final chain = StringBuffer();
+      if (c.isImage) {
+        args.addAll(['-loop', '1', '-framerate', '$fps', '-t', _n(c.outputDuration), '-i', c.path]);
+        chain.write('[${input++}:v]fps=$fps,setpts=PTS-STARTPTS');
+      } else {
+        args.addAll(['-i', c.path]);
+        final vi = input++;
+        chain.write('[$vi:v]trim=start=${_n(c.trimStart)}:end=${_n(c.trimEnd)},'
+            'setpts=(PTS-STARTPTS)/$speed,fps=$fps');
+        if (c.hasAudio) {
+          final fx = [
+            if (c.denoise) 'afftdn=nf=-25',
+            if (c.voiceFx.ffmpeg != null) c.voiceFx.ffmpeg!,
+          ];
+          f.add('[$vi:a]atrim=start=${_n(c.trimStart)}:end=${_n(c.trimEnd)},asetpts=PTS-STARTPTS,'
+              'atempo=$speed,volume=${c.volume.toStringAsFixed(2)}'
+              '${fx.isEmpty ? '' : ',${fx.join(',')}'},$_audioFormat[a$i]');
+        }
+      }
+      if (c.isImage || !c.hasAudio) {
+        final d = _n(c.outputDuration);
+        args.addAll(['-f', 'lavfi', '-t', d, '-i', 'anullsrc=r=44100:cl=stereo']);
+        f.add('[${input++}:a]atrim=duration=$d,asetpts=PTS-STARTPTS,$_audioFormat[a$i]');
+      }
+
+      final turn = _transpose(c.quarterTurns);
+      if (turn != null) chain.write(',$turn');
       switch (p.background) {
         case CanvasBackground.blur:
           chain
@@ -77,16 +105,6 @@ class ExportCommand {
       if (fx != null) chain.write(',$fx');
       chain.write(',settb=AVTB[v$i]');
       f.add(chain.toString());
-
-      if (c.hasAudio) {
-        f.add('[$vi:a]atrim=start=$start:end=$end,asetpts=PTS-STARTPTS,'
-            'atempo=$speed,volume=${c.volume.toStringAsFixed(2)},$_audioFormat[a$i]');
-      } else {
-        final d = _n(c.outputDuration);
-        args.addAll(['-f', 'lavfi', '-t', d, '-i', 'anullsrc=r=44100:cl=stereo']);
-        final ni = input++;
-        f.add('[$ni:a]atrim=duration=$d,asetpts=PTS-STARTPTS,$_audioFormat[a$i]');
-      }
     }
 
     // ── 2) Unione a coppie: xfade/acrossfade o concat ───────────────
@@ -111,8 +129,55 @@ class ExportCommand {
       aCur = aNext;
     }
 
-    // ── 3) Testi, sticker e sottotitoli ────────────────────────────
     final total = p.totalDuration;
+    final totalS = total.inMicroseconds / 1e6;
+    final extraAudio = <String>[];
+
+    // ── 3) Sovrapposizioni video/foto (PiP) ────────────────────────
+    for (var k = 0; k < p.pips.length; k++) {
+      final l = p.pips[k];
+      if (l.start >= total || l.duration <= Duration.zero) continue;
+      final s = l.start.inMicroseconds / 1e6;
+      final d = math.max(0.05, math.min(l.duration.inMicroseconds / 1e6, totalS - s));
+      final (pw, ph) = l.pixelSize(w);
+      if (l.isImage) {
+        args.addAll(['-loop', '1', '-framerate', '$fps', '-t', d.toStringAsFixed(3), '-i', l.path]);
+      } else {
+        args.addAll(['-ss', _n(l.trimStart), '-t', d.toStringAsFixed(3), '-i', l.path]);
+      }
+      final li = input++;
+      final chain = StringBuffer('[$li:v]fps=$fps,setpts=PTS-STARTPTS,scale=$pw:$ph,setsar=1,format=rgba');
+      final mask = pipMasks[k];
+      if (mask != null) {
+        args.addAll(['-loop', '1', '-framerate', '$fps', '-t', d.toStringAsFixed(3), '-i', mask]);
+        final mi = input++;
+        chain.write('[pv$k];[$mi:v]format=gray,scale=$pw:$ph[pm$k];[pv$k][pm$k]alphamerge');
+      }
+      // Il chroma key va dopo la maschera: alphamerge sovrascrive l'alfa.
+      if (l.chroma != null) {
+        final rgb = (l.chroma!.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0');
+        chain.write(',colorkey=0x$rgb:${l.chromaSimilarity.toStringAsFixed(3)}:0.08');
+      }
+      if (l.opacity < 0.999) chain.write(',colorchannelmixer=aa=${l.opacity.toStringAsFixed(3)}');
+      chain.write(',setpts=PTS+${s.toStringAsFixed(3)}/TB[p$k]');
+      f.add(chain.toString());
+
+      final prog = 'clip((t-${s.toStringAsFixed(3)})/${d.toStringAsFixed(3)},0,1)';
+      final x = _lerp(l.cx, l.toCx, prog), y = _lerp(l.cy, l.toCy, prog);
+      final next = 'vp$k';
+      f.add("[$vCur][p$k]overlay=x='($x)*W-w/2':y='($y)*H-h/2':eval=frame:eof_action=pass:"
+          "enable='between(t,${s.toStringAsFixed(3)},${(s + d).toStringAsFixed(3)})'[$next]");
+      vCur = next;
+
+      if (l.hasAudio && !l.isImage && l.volume > 0.001) {
+        final ms = (s * 1000).round();
+        f.add('[$li:a]asetpts=PTS-STARTPTS,volume=${l.volume.toStringAsFixed(2)},'
+            '$_audioFormat,adelay=$ms|$ms[pa$k]');
+        extraAudio.add('pa$k');
+      }
+    }
+
+    // ── 4) Testi, sticker e sottotitoli ────────────────────────────
     for (var k = 0; k < overlays.length; k++) {
       final r = overlays[k];
       final o = r.overlay;
@@ -134,17 +199,20 @@ class ExportCommand {
       ov.write(',setpts=PTS+${s.toStringAsFixed(3)}/TB[o$k]');
       f.add(ov.toString());
 
+      final origEnd = o.end.inMicroseconds / 1e6;
+      final prog = 'clip((t-${s.toStringAsFixed(3)})/${(origEnd - s).clamp(0.001, 1e9).toStringAsFixed(3)},0,1)';
+      final bx = _lerp(o.cx, o.toCx, prog), by = _lerp(o.cy, o.toCy, prog);
       final (dx, dy) = offsetExpr(o, 't', s, e);
       final next = 'vo$k';
       f.add("[$vCur][o$k]overlay="
-          "x='${_d(o.cx)}*W-w/2${dx == '0' ? '' : '+($dx)*W'}':"
-          "y='${_d(o.cy)}*H-h/2${dy == '0' ? '' : '+($dy)*H'}':"
+          "x='($bx)*W-w/2${dx == '0' ? '' : '+($dx)*W'}':"
+          "y='($by)*H-h/2${dy == '0' ? '' : '+($dy)*H'}':"
           "eval=frame:eof_action=pass:"
           "enable='between(t,${s.toStringAsFixed(3)},${e.toStringAsFixed(3)})'[$next]");
       vCur = next;
     }
 
-    // ── 4) Musica ───────────────────────────────────────────────────
+    // ── 5) Musica, voci fuori campo, effetti sonori ────────────────
     final music = p.music;
     if (music != null) {
       args.addAll([
@@ -153,13 +221,31 @@ class ExportCommand {
         '-i', music.path,
       ]);
       final mi = input++;
-      final totalS = total.inMicroseconds / 1e6;
       final fade = music.fadeOut && totalS > 3
           ? ',afade=t=out:st=${(totalS - 2).toStringAsFixed(3)}:d=2'
           : '';
       f.add('[$mi:a]atrim=duration=${_n(total)},asetpts=PTS-STARTPTS,'
           'volume=${music.volume.toStringAsFixed(2)}$fade,$_audioFormat[mus]');
-      f.add('[$aCur][mus]amix=inputs=2:duration=first:'
+      extraAudio.insert(0, 'mus');
+    }
+    for (var k = 0; k < p.audios.length; k++) {
+      final a = p.audios[k];
+      if (a.start >= total) continue;
+      args.addAll(['-i', a.path]);
+      final ai = input++;
+      final ms = (a.start.inMicroseconds / 1000).round();
+      final fx = [
+        if (a.denoise) 'afftdn=nf=-25',
+        if (a.fx.ffmpeg != null) a.fx.ffmpeg!,
+      ];
+      f.add('[$ai:a]atrim=duration=${_n(a.duration)},asetpts=PTS-STARTPTS'
+          '${fx.isEmpty ? '' : ',${fx.join(',')}'},'
+          'volume=${a.volume.toStringAsFixed(2)},$_audioFormat,adelay=$ms|$ms[au$k]');
+      extraAudio.add('au$k');
+    }
+    if (extraAudio.isNotEmpty) {
+      final ins = ['[$aCur]', for (final a in extraAudio) '[$a]'].join();
+      f.add('${ins}amix=inputs=${extraAudio.length + 1}:duration=first:'
           'dropout_transition=0:normalize=0[amix]');
       aCur = 'amix';
     }
@@ -175,9 +261,29 @@ class ExportCommand {
       '-c:a', 'aac',
       '-b:a', '192k',
       '-movflags', '+faststart',
+      '-t', _n(total),
       outputPath,
     ]);
     return args;
+  }
+
+  static String? _transpose(int quarterTurns) {
+    switch (quarterTurns % 4) {
+      case 1:
+        return 'transpose=1';
+      case 2:
+        return 'hflip,vflip';
+      case 3:
+        return 'transpose=2';
+      default:
+        return null;
+    }
+  }
+
+  /// Interpolazione lineare tra due valori (keyframe), come espressione.
+  static String _lerp(double from, double? to, String prog) {
+    if (to == null || (to - from).abs() < 1e-6) return _d(from);
+    return '${_d(from)}+(${_d(to - from)})*$prog';
   }
 
   /// Filtro FFmpeg per un effetto, o null.

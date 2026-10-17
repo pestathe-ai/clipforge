@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/project.dart';
+import '../render/mask_painter.dart';
 import '../render/overlay_painter.dart';
 import 'export_command.dart';
 
@@ -16,10 +17,14 @@ class MediaInfo {
     required this.duration,
     required this.hasAudio,
     required this.hasVideo,
+    this.width = 0,
+    this.height = 0,
   });
   final Duration duration;
   final bool hasAudio;
   final bool hasVideo;
+  final int width;
+  final int height;
 }
 
 class ExportException implements Exception {
@@ -42,11 +47,29 @@ class FFmpegService {
       throw ExportException('Impossibile leggere il file: ${p.basename(path)}');
     }
     final seconds = double.tryParse(info.getDuration() ?? '') ?? 0;
-    final types = info.getStreams().map((s) => s.getType()).toSet();
+    final streams = info.getStreams();
+    final types = streams.map((s) => s.getType()).toSet();
+    var w = 0, h = 0;
+    for (final s in streams) {
+      if (s.getType() == 'video') {
+        w = s.getWidth() ?? 0;
+        h = s.getHeight() ?? 0;
+        // Video girati in verticale: lo stream è orizzontale + rotazione.
+        final rot = int.tryParse('${s.getTags()?['rotate'] ?? ''}') ?? 0;
+        if (rot % 180 != 0) {
+          final t = w;
+          w = h;
+          h = t;
+        }
+        break;
+      }
+    }
     return MediaInfo(
       duration: Duration(microseconds: (seconds * 1e6).round()),
       hasAudio: types.contains('audio'),
       hasVideo: types.contains('video'),
+      width: w,
+      height: h,
     );
   }
 
@@ -104,6 +127,22 @@ class FFmpegService {
     return ok ? outPath : null;
   }
 
+  /// Crea una copia al contrario del tratto tagliato di una clip.
+  Future<String?> reverse(VideoClip c, String outPath) async {
+    final ok = await _run([
+      '-y',
+      '-ss', _s(c.trimStart),
+      '-to', _s(c.trimEnd),
+      '-i', c.path,
+      '-vf', 'reverse',
+      if (c.hasAudio) ...['-af', 'areverse'] else '-an',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18',
+      if (c.hasAudio) ...['-c:a', 'aac', '-b:a', '192k'],
+      outPath,
+    ]);
+    return ok ? outPath : null;
+  }
+
   /// Esporta il progetto in MP4. [onProgress] riceve un valore 0–1.
   Future<String> export(
     Project project, {
@@ -126,6 +165,17 @@ class FFmpegService {
       rendered.add(RenderedOverlay(o, path, w, h));
     }
 
+    // Maschere delle sovrapposizioni → PNG alla dimensione del livello.
+    final masks = <int, String>{};
+    for (var i = 0; i < project.pips.length; i++) {
+      final l = project.pips[i];
+      if (l.mask == MaskShape.none) continue;
+      final (w, h) = l.pixelSize(project.aspect.width);
+      final path = p.join(work.path, 'mask_$i.png');
+      await writeMaskPng(l.mask, w, h, path);
+      masks[i] = path;
+    }
+
     final docs = await getApplicationDocumentsDirectory();
     final out = p.join(
       docs.path,
@@ -136,6 +186,7 @@ class FFmpegService {
       project: project,
       outputPath: out,
       overlays: rendered,
+      pipMasks: masks,
       preset: highQuality ? 'medium' : 'veryfast',
     ).build();
 

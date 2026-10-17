@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/project.dart';
+import '../models/templates.dart';
 
 String fmt(Duration d) {
   final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
@@ -546,5 +547,246 @@ Future<bool?> showFormatSheet(BuildContext context, Project p) {
         _done(ctx),
       ]);
     }),
+  );
+}
+
+// ─────────────────────────── Novità v0.3 ───────────────────────────
+
+Future<bool?> showRotateSheet(BuildContext context, VideoClip clip) {
+  return _sheet<bool>(
+    context,
+    'Ruota',
+    StatefulBuilder(builder: (ctx, setState) {
+      return Column(children: [
+        Wrap(spacing: 8, children: [
+          for (var q = 0; q < 4; q++)
+            ChoiceChip(
+              label: Text('${q * 90}°'),
+              selected: clip.quarterTurns % 4 == q,
+              onSelected: (_) => setState(() => clip.quarterTurns = q),
+            ),
+        ]),
+        _done(ctx),
+      ]);
+    }),
+  );
+}
+
+Future<bool?> showImageDurationSheet(BuildContext context, VideoClip clip) {
+  return _sheet<bool>(
+    context,
+    'Durata foto',
+    StatefulBuilder(builder: (ctx, setState) {
+      final s = _toSec(clip.trimEnd - clip.trimStart);
+      return Column(children: [
+        Text('${s.toStringAsFixed(1)} s', style: Theme.of(ctx).textTheme.headlineSmall),
+        Slider(
+          min: 0.5,
+          max: 15,
+          divisions: 29,
+          value: s.clamp(0.5, 15),
+          onChanged: (v) => setState(() {
+            clip.trimStart = Duration.zero;
+            clip.trimEnd = _sec(v);
+          }),
+        ),
+        _done(ctx),
+      ]);
+    }),
+  );
+}
+
+Future<bool?> showAudioFxSheet(BuildContext context,
+    {required AudioFx value, required bool denoise, required void Function(AudioFx fx, bool denoise) onChanged}) {
+  var fx = value;
+  var dn = denoise;
+  return _sheet<bool>(
+    context,
+    'Effetti voce',
+    StatefulBuilder(builder: (ctx, setState) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Wrap(spacing: 8, runSpacing: 4, children: [
+          for (final f in AudioFx.values)
+            ChoiceChip(
+              label: Text(f.label),
+              selected: fx == f,
+              onSelected: (_) => setState(() {
+                fx = f;
+                onChanged(fx, dn);
+              }),
+            ),
+        ]),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Riduci rumore di fondo'),
+          subtitle: const Text('Toglie fruscio, vento e brusio'),
+          value: dn,
+          onChanged: (v) => setState(() {
+            dn = v;
+            onChanged(fx, dn);
+          }),
+        ),
+        const Text('Gli effetti si sentono nel video esportato.',
+            style: TextStyle(fontSize: 12, color: Colors.white54)),
+        _done(ctx),
+      ]);
+    }),
+  );
+}
+
+Future<bool?> showMaskSheet(BuildContext context, PipLayer l) {
+  return _sheet<bool>(
+    context,
+    'Maschera',
+    StatefulBuilder(builder: (ctx, setState) {
+      return Column(children: [
+        _ChoiceGrid<MaskShape>(
+          values: MaskShape.values,
+          selected: l.mask,
+          label: (m) => m.label,
+          icon: (m) => m.icon,
+          onSelect: (m) => setState(() => l.mask = m),
+        ),
+        _done(ctx),
+      ]);
+    }),
+  );
+}
+
+const _chromaColors = <(String, Color)>[
+  ('Verde', Color(0xFF00FF00)),
+  ('Verde scuro', Color(0xFF00B140)),
+  ('Blu', Color(0xFF0047BB)),
+  ('Nero', Color(0xFF000000)),
+  ('Bianco', Color(0xFFFFFFFF)),
+];
+
+Future<bool?> showChromaSheet(BuildContext context, PipLayer l) {
+  return _sheet<bool>(
+    context,
+    'Chroma key (green screen)',
+    StatefulBuilder(builder: (ctx, setState) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Rende trasparente il colore dello sfondo della sovrapposizione.',
+            style: TextStyle(fontSize: 13, color: Colors.white60)),
+        const SizedBox(height: 12),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          ChoiceChip(
+            label: const Text('Spento'),
+            selected: l.chroma == null,
+            onSelected: (_) => setState(() => l.chroma = null),
+          ),
+          for (final c in _chromaColors)
+            ChoiceChip(
+              avatar: CircleAvatar(backgroundColor: c.$2, radius: 8),
+              label: Text(c.$1),
+              selected: l.chroma?.toARGB32() == c.$2.toARGB32(),
+              onSelected: (_) => setState(() => l.chroma = c.$2),
+            ),
+        ]),
+        const SizedBox(height: 12),
+        Text('Intensità ${(l.chromaSimilarity * 100).round()}'),
+        Slider(
+          min: 0.05,
+          max: 0.6,
+          value: l.chromaSimilarity.clamp(0.05, 0.6),
+          onChanged: l.chroma == null ? null : (v) => setState(() => l.chromaSimilarity = v),
+        ),
+        const Text('Nell\'anteprima lo sfondo resta visibile: viene tolto nel video esportato.',
+            style: TextStyle(fontSize: 12, color: Colors.white54)),
+        _done(ctx),
+      ]);
+    }),
+  );
+}
+
+Future<bool?> showOpacitySheet(BuildContext context, PipLayer l) {
+  return _sheet<bool>(
+    context,
+    'Opacità',
+    StatefulBuilder(builder: (ctx, setState) {
+      return Column(children: [
+        Text('${(l.opacity * 100).round()}%', style: Theme.of(ctx).textTheme.headlineSmall),
+        Slider(min: 0.05, max: 1, value: l.opacity, onChanged: (v) => setState(() => l.opacity = v)),
+        _done(ctx),
+      ]);
+    }),
+  );
+}
+
+/// Movimento (keyframe): sposta un elemento da un punto a un altro.
+Future<bool?> showMotionSheet(BuildContext context,
+    {required bool enabled, required ValueChanged<bool> onChanged}) {
+  var on = enabled;
+  return _sheet<bool>(
+    context,
+    'Movimento (keyframe)',
+    StatefulBuilder(builder: (ctx, setState) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Muovi durante la durata'),
+          value: on,
+          onChanged: (v) => setState(() {
+            on = v;
+            onChanged(v);
+          }),
+        ),
+        const Text(
+          'Come si usa:\n'
+          '• porta la testina verso l\'INIZIO dell\'elemento e trascinalo dove deve partire;\n'
+          '• porta la testina verso la FINE e trascinalo dove deve arrivare.\n'
+          'Nel mezzo si sposta da solo.',
+          style: TextStyle(fontSize: 13, color: Colors.white70, height: 1.4),
+        ),
+        _done(ctx),
+      ]);
+    }),
+  );
+}
+
+Future<(ProjectTemplate, String)?> showTemplateSheet(BuildContext context, List<ProjectTemplate> templates) {
+  final title = TextEditingController();
+  return showModalBottomSheet<(ProjectTemplate, String)>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    backgroundColor: const Color(0xFF1A1B20),
+    builder: (ctx) => Padding(
+      padding: EdgeInsets.fromLTRB(20, 0, 20, 20 + MediaQuery.viewInsetsOf(ctx).bottom),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(ctx).height * 0.8),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Modelli', style: Theme.of(ctx).textTheme.titleLarge),
+          const SizedBox(height: 4),
+          const Text('Applicano stile, transizioni ed effetti a tutte le clip.',
+              style: TextStyle(fontSize: 13, color: Colors.white60)),
+          const SizedBox(height: 12),
+          TextField(
+            controller: title,
+            decoration: const InputDecoration(
+              labelText: 'Titolo (facoltativo)',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Flexible(
+            child: ListView(shrinkWrap: true, children: [
+              for (final t in templates)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: CircleAvatar(
+                    backgroundColor: Theme.of(ctx).colorScheme.primary.withValues(alpha: 0.2),
+                    child: Icon(t.icon, color: Theme.of(ctx).colorScheme.primary),
+                  ),
+                  title: Text(t.name),
+                  subtitle: Text(t.description, style: const TextStyle(fontSize: 12)),
+                  onTap: () => Navigator.pop(ctx, (t, title.text.trim())),
+                ),
+            ]),
+          ),
+        ]),
+      ),
+    ),
   );
 }

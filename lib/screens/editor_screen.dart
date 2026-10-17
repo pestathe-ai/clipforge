@@ -11,13 +11,17 @@ import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/project.dart';
+import '../models/templates.dart';
+import '../render/mask_painter.dart';
 import '../render/overlay_painter.dart';
 import '../services/ffmpeg_service.dart';
 import '../services/subtitle_service.dart';
 import '../state/history.dart';
+import '../state/layer_players.dart';
 import '../widgets/edit_sheets.dart';
 import '../widgets/subtitle_sheet.dart';
 import '../widgets/timeline.dart';
+import '../widgets/voice_sheet.dart';
 
 class EditorScreen extends StatefulWidget {
   const EditorScreen({super.key, required this.project, this.pickOnStart = true});
@@ -45,6 +49,8 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
   Duration _position = Duration.zero;
   Selection _selection = const Selection.none();
   final _thumbs = <String, List<String>>{};
+  final _layers = LayerPlayers();
+  bool _recordingVoice = false;
 
   // Riproduzione fluida: la posizione viene stimata a ogni frame.
   late final Ticker _ticker = createTicker(_onFrame);
@@ -53,7 +59,8 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
   Duration _anchorWall = Duration.zero;
 
   // Gesti sugli overlay nell'anteprima.
-  double _gCx = 0, _gCy = 0, _gFont = 0, _gRot = 0;
+  double _gCx = 0, _gCy = 0, _gFont = 0, _gRot = 0, _gScale = 0;
+  bool _gEditEnd = false; // keyframe: si sta spostando il punto di arrivo
   Offset _gFocal = Offset.zero;
   bool _gActive = false;
 
@@ -62,8 +69,11 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     super.initState();
     _clock.start();
     for (final c in _p.clips) {
-      _loadThumbs(c.path);
+      c.isImage ? _thumbs[c.path] = [c.path] : _loadThumbs(c.path);
     }
+    _layers.addListener(() {
+      if (mounted) setState(() {});
+    });
     if (_p.music != null) _loadMusic(_p.music!.path);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_p.clips.isEmpty && widget.pickOnStart) {
@@ -77,6 +87,7 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
   @override
   void dispose() {
     _ticker.dispose();
+    _layers.dispose();
     _video?.dispose();
     _musicPlayer?.dispose();
     super.dispose();
@@ -140,6 +151,21 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     if (local < Duration.zero) local = Duration.zero;
     final sourcePos = clip.sourceAt(local);
 
+    if (clip.isImage) {
+      final old = _video;
+      _video = null;
+      _clipIndex = index;
+      _loadedPath = clip.path;
+      await old?.dispose();
+      await _seekMusic(t);
+      await _layers.sync(_layerEntries(), t, playing: keepPlaying || _playing);
+      _anchor = t;
+      _anchorWall = _clock.elapsed;
+      if (keepPlaying || _playing) await _musicPlayer?.play();
+      if (mounted) setState(() => _position = t);
+      return;
+    }
+
     if (_video == null || index != _clipIndex || _loadedPath != clip.path) {
       _switching = true;
       try {
@@ -157,9 +183,10 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     }
     final c = _video!;
     await c.setPlaybackSpeed(clip.speed);
-    await c.setVolume(clip.volume.clamp(0.0, 1.0));
+    await c.setVolume(_recordingVoice ? 0 : clip.volume.clamp(0.0, 1.0));
     await c.seekTo(sourcePos);
     await _seekMusic(t);
+    await _layers.sync(_layerEntries(), t, playing: keepPlaying || _playing);
     _anchor = t;
     _anchorWall = _clock.elapsed;
     if (keepPlaying || _playing) {
@@ -174,8 +201,31 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     if (m == null || mp == null || m.duration <= Duration.zero) return;
     final pos = (m.offset + t).inMicroseconds % m.duration.inMicroseconds;
     await mp.seekTo(Duration(microseconds: pos));
-    await mp.setVolume(m.volume.clamp(0.0, 1.0));
+    await mp.setVolume(_recordingVoice ? 0 : m.volume.clamp(0.0, 1.0));
   }
+
+  /// Player secondari: sovrapposizioni video, voci e suoni.
+  List<LayerEntry> _layerEntries() => [
+        for (final l in _p.pips)
+          if (!l.isImage)
+            LayerEntry(
+              key: l,
+              path: l.path,
+              start: l.start,
+              sourceStart: l.trimStart,
+              duration: l.duration,
+              volume: _recordingVoice ? 0 : l.volume,
+            ),
+        for (final a in _p.audios)
+          LayerEntry(
+            key: a,
+            path: a.path,
+            start: a.start,
+            sourceStart: Duration.zero,
+            duration: a.duration,
+            volume: _recordingVoice ? 0 : a.volume,
+          ),
+      ];
 
   void _onFrame(Duration _) {
     if (!_playing || _switching || _clipIndex < 0) return;
@@ -192,9 +242,13 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
       _seek(est, keepPlaying: true);
       return;
     }
+    final entries = _layerEntries();
+    if (entries.isNotEmpty && _layers.visibilityChanged(entries, est)) {
+      _layers.sync(entries, est, playing: true);
+    }
     // Ri-aggancia alla posizione reale del player se ci si discosta troppo.
     final v = _video;
-    if (v != null && v.value.isPlaying) {
+    if (v != null && v.value.isPlaying && !clip.isImage) {
       final real = _p.startOf(i) +
           Duration(
               microseconds: ((v.value.position - clip.trimStart).inMicroseconds / clip.speed).round());
@@ -221,6 +275,7 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     setState(() => _playing = false);
     await _video?.pause();
     await _musicPlayer?.pause();
+    await _layers.pauseAll();
   }
 
   Future<void> _refresh() async {
@@ -249,15 +304,21 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
 
   Future<void> _addClips() async {
     await _pause();
-    final res = await FilePicker.platform.pickFiles(type: FileType.video, allowMultiple: true);
+    final res = await FilePicker.platform.pickFiles(type: FileType.media, allowMultiple: true);
     if (res == null) return;
-    setState(() => _busy = 'Importo i video…');
+    setState(() => _busy = 'Importo…');
     final insertAt = _p.clips.isEmpty ? 0 : _p.clipIndexAt(_position) + 1;
     var added = 0;
     try {
       for (final f in res.files) {
         if (f.path == null) continue;
         final path = await _keep(f.path!);
+        if (_isImage(path)) {
+          _p.clips.insert(insertAt + added, VideoClip.image(path));
+          _thumbs[path] = [path];
+          added++;
+          continue;
+        }
         final info = await _ffmpeg.probe(path);
         if (!info.hasVideo || info.duration <= Duration.zero) {
           _toast('${f.name}: nessuna traccia video');
@@ -358,6 +419,10 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
         _musicPlayer?.dispose();
         _musicPlayer = null;
         _musicPath = null;
+      case SelectionKind.pip:
+        _p.pips.removeAt(_selection.index);
+      case SelectionKind.audio:
+        _p.audios.removeAt(_selection.index);
       case SelectionKind.transition:
       case SelectionKind.none:
         break;
@@ -467,6 +532,198 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
         ..animIn = src.animIn
         ..animOut = src.animOut;
     }
+    _commit();
+  }
+
+  // ───────────────────────── Novità v0.3 ─────────────────────────
+
+  static const _imageExt = {'.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif', '.bmp', '.gif'};
+  bool _isImage(String path) => _imageExt.contains(p.extension(path).toLowerCase());
+
+  Duration _clampToTotal(Duration t) {
+    final total = _p.totalDuration;
+    final max = total - const Duration(milliseconds: 300);
+    if (t > max) return max < Duration.zero ? Duration.zero : max;
+    return t;
+  }
+
+  /// Sovrapposizione: video o foto sopra il video principale.
+  Future<void> _addPip() async {
+    if (_p.clips.isEmpty) return _toast('Aggiungi prima un video');
+    await _pause();
+    final res = await FilePicker.platform.pickFiles(type: FileType.media);
+    final picked = res?.files.single.path;
+    if (picked == null) return;
+    setState(() => _busy = 'Preparo la sovrapposizione…');
+    try {
+      final path = await _keep(picked);
+      final info = await _ffmpeg.probe(path);
+      final image = _isImage(path);
+      if (info.width <= 0 || info.height <= 0) {
+        _toast('Non riesco a leggere questo file');
+        return;
+      }
+      final start = _clampToTotal(_position);
+      final room = _p.totalDuration - start;
+      final dur = image ? (room < const Duration(seconds: 3) ? room : const Duration(seconds: 3)) : info.duration;
+      _p.pips.add(PipLayer(
+        path: path,
+        isImage: image,
+        sourceDuration: image ? const Duration(minutes: 10) : info.duration,
+        width: info.width,
+        height: info.height,
+        hasAudio: !image && info.hasAudio,
+        start: start,
+        trimEnd: dur > room ? room : dur,
+      ));
+      _selection = Selection(SelectionKind.pip, _p.pips.length - 1);
+      _commit();
+    } catch (e) {
+      _toast('Errore: $e');
+    } finally {
+      if (mounted) setState(() => _busy = null);
+    }
+  }
+
+  Future<void> _recordVoice() async {
+    if (_p.clips.isEmpty) return _toast('Aggiungi prima un video');
+    await _pause();
+    if (!mounted) return;
+    final start = _clampToTotal(_position);
+    _position = start;
+    final path = await showVoiceSheet(
+      context,
+      onStart: () async {
+        _recordingVoice = true;
+        await _play();
+      },
+      onStop: () async {
+        await _pause();
+        _recordingVoice = false;
+      },
+    );
+    if (path == null) return;
+    try {
+      final info = await _ffmpeg.probe(path);
+      if (info.duration <= Duration.zero) return _toast('Registrazione vuota');
+      _p.audios.add(AudioItem(path: path, start: start, duration: info.duration));
+      _selection = Selection(SelectionKind.audio, _p.audios.length - 1);
+      _position = start;
+      _commit();
+    } catch (e) {
+      _toast('Errore: $e');
+    }
+  }
+
+  Future<void> _addSound() async {
+    if (_p.clips.isEmpty) return _toast('Aggiungi prima un video');
+    await _pause();
+    final res = await FilePicker.platform.pickFiles(type: FileType.audio);
+    final picked = res?.files.single.path;
+    if (picked == null) return;
+    try {
+      final path = await _keep(picked);
+      final info = await _ffmpeg.probe(path);
+      if (!info.hasAudio) return _toast('Il file non contiene audio');
+      _p.audios.add(AudioItem(
+        path: path,
+        start: _clampToTotal(_position),
+        duration: info.duration,
+        isVoice: false,
+      ));
+      _selection = Selection(SelectionKind.audio, _p.audios.length - 1);
+      _commit();
+    } catch (e) {
+      _toast('Errore: $e');
+    }
+  }
+
+  Future<void> _applyTemplate() async {
+    if (_p.clips.isEmpty) return _toast('Aggiungi prima qualche video o foto');
+    await _pause();
+    if (!mounted) return;
+    final res = await showTemplateSheet(context, projectTemplates);
+    if (res == null) return;
+    res.$1.apply(_p, res.$2);
+    _commit();
+    _toast('Modello "${res.$1.name}" applicato');
+  }
+
+  Future<void> _toggleReverse() async {
+    final i = _targetClip;
+    final c = _p.clips[i];
+    if (c.isImage) return _toast('Le foto non si possono invertire');
+    await _pause();
+    setState(() => _busy = c.reversed ? 'Ripristino la clip…' : 'Inverto la clip…');
+    try {
+      VideoClip next;
+      if (!c.reversed) {
+        if (c.trimEnd - c.trimStart > const Duration(seconds: 60)) {
+          _toast('Per invertirla, taglia la clip sotto i 60 secondi');
+          return;
+        }
+        final docs = await getApplicationDocumentsDirectory();
+        final out = p.join(docs.path, 'media', 'rev_${DateTime.now().millisecondsSinceEpoch}.mp4');
+        final ok = await _ffmpeg.reverse(c, out);
+        if (ok == null) return _toast('Non sono riuscito a invertire la clip');
+        final len = c.trimEnd - c.trimStart;
+        next = VideoClip.fromJson({
+          ...c.toJson(),
+          'path': out,
+          'sourceDuration': len.inMicroseconds,
+          'trimStart': 0,
+          'trimEnd': len.inMicroseconds,
+          'reversed': true,
+          'originalPath': c.originalPath ?? c.path,
+        });
+      } else {
+        final orig = c.originalPath ?? c.path;
+        final info = await _ffmpeg.probe(orig);
+        next = VideoClip.fromJson({
+          ...c.toJson(),
+          'path': orig,
+          'sourceDuration': info.duration.inMicroseconds,
+          'trimStart': 0,
+          'trimEnd': info.duration.inMicroseconds,
+          'reversed': false,
+          'originalPath': null,
+        });
+      }
+      _p.clips[i] = next;
+      _loadThumbs(next.path);
+      _selection = Selection(SelectionKind.clip, i);
+      _commit();
+    } catch (e) {
+      _toast('Errore: $e');
+    } finally {
+      if (mounted) setState(() => _busy = null);
+    }
+  }
+
+  Future<void> _editPip(Future<bool?> Function(PipLayer l) sheet) async {
+    await _pause();
+    if (!mounted) return;
+    await sheet(_p.pips[_selection.index]);
+    _commit();
+  }
+
+  /// Attiva/disattiva il movimento (keyframe) di un testo o una sovrapposizione.
+  Future<void> _motion() async {
+    await _pause();
+    if (!mounted) return;
+    final isPip = _selection.kind == SelectionKind.pip;
+    final pip = isPip ? _p.pips[_selection.index] : null;
+    final ov = isPip ? null : _p.overlays[_selection.index];
+    final enabled = (pip?.toCx ?? ov?.toCx) != null;
+    await showMotionSheet(context, enabled: enabled, onChanged: (on) {
+      if (pip != null) {
+        pip.toCx = on ? (pip.cx > 0.5 ? pip.cx - 0.3 : pip.cx + 0.3) : null;
+        pip.toCy = on ? pip.cy : null;
+      } else if (ov != null) {
+        ov.toCx = on ? (ov.cx > 0.5 ? ov.cx - 0.3 : ov.cx + 0.3) : null;
+        ov.toCy = on ? ov.cy : null;
+      }
+    });
     _commit();
   }
 
@@ -616,13 +873,12 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
         ]),
       );
     }
-    final c = _video;
-    if (_p.clips.isEmpty || c == null || !c.value.isInitialized) {
+    if (_p.clips.isEmpty || _clipIndex < 0) {
       return Center(
         child: FilledButton.tonalIcon(
           onPressed: _addClips,
           icon: const Icon(Icons.add_rounded),
-          label: const Text('Aggiungi video'),
+          label: const Text('Aggiungi video o foto'),
         ),
       );
     }
@@ -632,20 +888,25 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     final localS = math.max(0.0, (_position - _p.startOf(i)).inMicroseconds / 1e6);
     final durS = math.max(0.01, clip.outputDuration.inMicroseconds / 1e6);
 
-    Widget video = SizedBox(
-      width: c.value.size.width,
-      height: c.value.size.height,
-      child: VideoPlayer(c),
-    );
+    final c = _video;
+    Widget media;
+    if (clip.isImage) {
+      media = Image.file(File(clip.path), gaplessPlayback: true);
+    } else if (c != null && c.value.isInitialized) {
+      media = SizedBox(width: c.value.size.width, height: c.value.size.height, child: VideoPlayer(c));
+    } else {
+      media = const SizedBox(width: 16, height: 9);
+    }
+    if (clip.quarterTurns % 4 != 0) media = RotatedBox(quarterTurns: clip.quarterTurns, child: media);
 
-    final fg = FittedBox(fit: BoxFit.contain, child: video);
+    final fg = FittedBox(fit: BoxFit.contain, child: media);
     final Widget bg = switch (_p.background) {
       CanvasBackground.black => const ColoredBox(color: Colors.black),
       CanvasBackground.white => const ColoredBox(color: Colors.white),
       CanvasBackground.blur => ClipRect(
           child: ImageFiltered(
             imageFilter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-            child: FittedBox(fit: BoxFit.cover, child: video),
+            child: FittedBox(fit: BoxFit.cover, child: media),
           ),
         ),
     };
@@ -663,8 +924,8 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
           final selected = _selection.kind == SelectionKind.overlay ? _p.overlays[_selection.index] : null;
           return GestureDetector(
             onTapUp: (d) => _tapPreview(d.localPosition, size),
-            onScaleStart: (d) => _overlayGestureStart(d.localFocalPoint, size),
-            onScaleUpdate: (d) => _overlayGestureUpdate(d, size),
+            onScaleStart: (d) => _gestureStart(d.localFocalPoint, size),
+            onScaleUpdate: (d) => _gestureUpdate(d, size),
             onScaleEnd: (_) {
               if (_gActive) {
                 _gActive = false;
@@ -674,6 +935,8 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
             child: ClipRect(
               child: Stack(fit: StackFit.expand, children: [
                 frame,
+                for (var k = 0; k < _p.pips.length; k++)
+                  if (_p.pips[k].visibleAt(_position)) _pipWidget(k, size),
                 CustomPaint(
                   painter: OverlaysPainter(
                     overlays: _p.overlays,
@@ -692,6 +955,51 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
             ),
           );
         }),
+      ),
+    );
+  }
+
+  Rect _pipRect(PipLayer l, Size size) {
+    final w = size.width * l.scale;
+    final h = w * l.height / l.width;
+    final c = l.centerAt(_position);
+    return Rect.fromCenter(center: Offset(c.dx * size.width, c.dy * size.height), width: w, height: h);
+  }
+
+  Widget _pipWidget(int k, Size size) {
+    final l = _p.pips[k];
+    final r = _pipRect(l, size);
+    Widget content;
+    if (l.isImage) {
+      content = Image.file(File(l.path), fit: BoxFit.cover, gaplessPlayback: true);
+    } else {
+      final c = _layers.controllerFor(l);
+      content = c == null
+          ? const ColoredBox(color: Colors.black26)
+          : FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(width: c.value.size.width, height: c.value.size.height, child: VideoPlayer(c)),
+            );
+    }
+    if (l.mask != MaskShape.none) content = ClipPath(clipper: MaskClipper(l.mask), child: content);
+    final selected = _selection.isPip(k);
+    return Positioned.fromRect(
+      rect: r,
+      child: IgnorePointer(
+        child: Opacity(
+          opacity: l.opacity,
+          child: Stack(fit: StackFit.expand, children: [
+            content,
+            if (selected)
+              DecoratedBox(decoration: BoxDecoration(border: Border.all(color: Colors.white, width: 1.5))),
+            if (l.chroma != null)
+              const Positioned(
+                left: 4,
+                top: 4,
+                child: Icon(Icons.format_color_reset_rounded, size: 14, color: Colors.white70),
+              ),
+          ]),
+        ),
       ),
     );
   }
@@ -765,70 +1073,125 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     }
   }
 
-  /// Overlay sotto il dito (il più in alto), o null.
-  int? _hitOverlay(Offset pos, Size size) {
+  /// Elemento sotto il dito: prima testi/sticker (stanno sopra), poi
+  /// le sovrapposizioni.
+  Selection? _hit(Offset pos, Size size) {
     final scale = size.width / _p.aspect.width;
     final t = _position.inMicroseconds / 1e6;
     for (var i = _p.overlays.length - 1; i >= 0; i--) {
       final o = _p.overlays[i];
       if (!o.visibleAt(_position)) continue;
       final a = o.animAt(t);
+      final base = o.centerAt(_position);
       final l = OverlayLayout(o, scale: scale, frameWidth: _p.aspect.width);
       final r = Rect.fromCenter(
-        center: Offset((o.cx + a.dx) * size.width, (o.cy + a.dy) * size.height),
+        center: Offset((base.dx + a.dx) * size.width, (base.dy + a.dy) * size.height),
         width: l.size.width + 24,
         height: l.size.height + 24,
       );
-      if (r.contains(pos)) return i;
+      if (r.contains(pos)) return Selection(SelectionKind.overlay, i);
+    }
+    for (var k = _p.pips.length - 1; k >= 0; k--) {
+      final l = _p.pips[k];
+      if (l.visibleAt(_position) && _pipRect(l, size).contains(pos)) {
+        return Selection(SelectionKind.pip, k);
+      }
     }
     return null;
   }
 
   void _tapPreview(Offset pos, Size size) {
-    final hit = _hitOverlay(pos, size);
+    final hit = _hit(pos, size);
     if (hit != null) {
-      if (_selection.isOverlay(hit)) {
-        final o = _p.overlays[hit];
-        if (o.kind != OverlayKind.sticker) _addOrEditText(hit);
+      if (hit == _selection && hit.kind == SelectionKind.overlay) {
+        final o = _p.overlays[hit.index];
+        if (o.kind != OverlayKind.sticker) _addOrEditText(hit.index);
       } else {
         _pause();
-        setState(() => _selection = Selection(SelectionKind.overlay, hit));
+        setState(() => _selection = hit);
       }
       return;
     }
     _playing ? _pause() : _play();
   }
 
-  void _overlayGestureStart(Offset focal, Size size) {
-    var idx = _selection.kind == SelectionKind.overlay ? _selection.index : null;
-    final hit = _hitOverlay(focal, size);
-    if (hit != null) idx = hit;
-    if (idx == null || !_p.overlays[idx].visibleAt(_position)) {
+  bool get _selVisible => switch (_selection.kind) {
+        SelectionKind.overlay => _p.overlays[_selection.index].visibleAt(_position),
+        SelectionKind.pip => _p.pips[_selection.index].visibleAt(_position),
+        _ => false,
+      };
+
+  void _gestureStart(Offset focal, Size size) {
+    final hit = _hit(focal, size);
+    if (hit != null) _selection = hit;
+    if (!_selVisible) {
       _gActive = false;
       return;
     }
     if (_playing) _pause();
-    final o = _p.overlays[idx];
-    _selection = Selection(SelectionKind.overlay, idx);
     _gActive = true;
-    _gCx = o.cx;
-    _gCy = o.cy;
-    _gFont = o.fontSize;
-    _gRot = o.rotation;
     _gFocal = focal;
+    double? toCx, toCy;
+    Duration start, end;
+    if (_selection.kind == SelectionKind.overlay) {
+      final o = _p.overlays[_selection.index];
+      _gFont = o.fontSize;
+      _gRot = o.rotation;
+      toCx = o.toCx;
+      toCy = o.toCy;
+      start = o.start;
+      end = o.end;
+      _gCx = o.cx;
+      _gCy = o.cy;
+    } else {
+      final l = _p.pips[_selection.index];
+      _gScale = l.scale;
+      toCx = l.toCx;
+      toCy = l.toCy;
+      start = l.start;
+      end = l.end;
+      _gCx = l.cx;
+      _gCy = l.cy;
+    }
+    // Con il movimento attivo, nella seconda metà si sposta il punto d'arrivo.
+    final mid = start + (end - start) ~/ 2;
+    _gEditEnd = toCx != null && _position >= mid;
+    if (_gEditEnd) {
+      _gCx = toCx!;
+      _gCy = toCy ?? _gCy;
+    }
     setState(() {});
   }
 
-  void _overlayGestureUpdate(ScaleUpdateDetails d, Size size) {
+  void _gestureUpdate(ScaleUpdateDetails d, Size size) {
     if (!_gActive) return;
-    final o = _p.overlays[_selection.index];
     final delta = d.localFocalPoint - _gFocal;
+    final nx = (_gCx + delta.dx / size.width).clamp(-0.2, 1.2);
+    final ny = (_gCy + delta.dy / size.height).clamp(-0.2, 1.2);
     setState(() {
-      o.cx = (_gCx + delta.dx / size.width).clamp(0.0, 1.0);
-      o.cy = (_gCy + delta.dy / size.height).clamp(0.0, 1.0);
-      if (d.pointerCount > 1) {
-        o.fontSize = (_gFont * d.scale).clamp(20.0, 600.0);
-        o.rotation = _gRot + d.rotation;
+      if (_selection.kind == SelectionKind.overlay) {
+        final o = _p.overlays[_selection.index];
+        if (_gEditEnd) {
+          o.toCx = nx;
+          o.toCy = ny;
+        } else {
+          o.cx = nx;
+          o.cy = ny;
+        }
+        if (d.pointerCount > 1) {
+          o.fontSize = (_gFont * d.scale).clamp(20.0, 600.0);
+          o.rotation = _gRot + d.rotation;
+        }
+      } else {
+        final l = _p.pips[_selection.index];
+        if (_gEditEnd) {
+          l.toCx = nx;
+          l.toCy = ny;
+        } else {
+          l.cx = nx;
+          l.cy = ny;
+        }
+        if (d.pointerCount > 1) l.scale = (_gScale * d.scale).clamp(0.08, 1.6);
       }
     });
   }
@@ -857,36 +1220,55 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
 
   Widget _toolbar() {
     final items = <_Tool>[];
+    Future<void> format() async {
+      await _pause();
+      if (!mounted) return;
+      await showFormatSheet(context, _p);
+      _commit();
+    }
+
     switch (_selection.kind) {
       case SelectionKind.none:
       case SelectionKind.transition:
         items.addAll([
           _Tool(Icons.content_cut_rounded, 'Dividi', _p.clips.isEmpty ? null : _splitClip),
-          _Tool(Icons.music_note_rounded, 'Audio', _addMusic),
+          _Tool(Icons.dashboard_customize_rounded, 'Modelli', _applyTemplate),
+          _Tool(Icons.music_note_rounded, 'Musica', _addMusic),
+          _Tool(Icons.mic_rounded, 'Voce', _recordVoice),
+          _Tool(Icons.graphic_eq_rounded, 'Suoni', _addSound),
           _Tool(Icons.title_rounded, 'Testo', () => _addOrEditText()),
           _Tool(Icons.emoji_emotions_rounded, 'Sticker', _addSticker),
+          _Tool(Icons.picture_in_picture_alt_rounded, 'Sovrapponi', _addPip),
           _Tool(Icons.subtitles_rounded, 'Sottotitoli', _autoSubtitles),
           _Tool(Icons.auto_awesome_rounded, 'Effetti', () => _editClip((c) => showEffectSheet(context, c))),
           _Tool(Icons.filter_vintage_rounded, 'Filtri', () => _editClip((c) => showFilterSheet(context, c, applyToAll: _filterAll(c)))),
-          _Tool(Icons.speed_rounded, 'Velocità', () => _editClip((c) => showSpeedSheet(context, c))),
-          _Tool(Icons.aspect_ratio_rounded, 'Formato', () async {
-            await _pause();
-            if (!mounted) return;
-            await showFormatSheet(context, _p);
-            _commit();
-          }),
+          _Tool(Icons.aspect_ratio_rounded, 'Formato', format),
         ]);
       case SelectionKind.clip:
         final clip = _p.clips[_selection.index];
         items.addAll([
           _Tool(Icons.content_cut_rounded, 'Dividi', _splitClip),
-          _Tool(Icons.speed_rounded, 'Velocità', () => _editClip((c) => showSpeedSheet(context, c))),
+          if (clip.isImage)
+            _Tool(Icons.timer_rounded, 'Durata', () => _editClip((c) => showImageDurationSheet(context, c)))
+          else
+            _Tool(Icons.speed_rounded, 'Velocità', () => _editClip((c) => showSpeedSheet(context, c))),
           _Tool(Icons.auto_awesome_rounded, 'Effetti', () => _editClip((c) => showEffectSheet(context, c))),
           _Tool(Icons.filter_vintage_rounded, 'Filtri', () => _editClip((c) => showFilterSheet(context, c, applyToAll: _filterAll(c)))),
-          if (clip.hasAudio)
+          _Tool(Icons.rotate_right_rounded, 'Ruota', () => _editClip((c) => showRotateSheet(context, c))),
+          if (!clip.isImage)
+            _Tool(clip.reversed ? Icons.restore_rounded : Icons.fast_rewind_rounded,
+                clip.reversed ? 'Originale' : 'Al contrario', _toggleReverse),
+          if (clip.hasAudio && !clip.isImage) ...[
             _Tool(Icons.volume_up_rounded, 'Volume', () => _editClip((c) => showVolumeSheet(context,
                 title: 'Volume clip', value: c.volume, onChanged: (v) => c.volume = v))),
-          _Tool(Icons.crop_rounded, 'Taglia', () => _editClip((c) => showTrimSheet(context, c))),
+            _Tool(Icons.record_voice_over_rounded, 'Effetti voce', () => _editClip((c) => showAudioFxSheet(context,
+                value: c.voiceFx, denoise: c.denoise, onChanged: (fx, dn) {
+                  c.voiceFx = fx;
+                  c.denoise = dn;
+                }))),
+          ],
+          if (!clip.isImage)
+            _Tool(Icons.crop_rounded, 'Taglia', () => _editClip((c) => showTrimSheet(context, c))),
           _Tool(Icons.copy_rounded, 'Duplica', _duplicateClip),
           _Tool(Icons.delete_outline_rounded, 'Elimina', _deleteSelected),
         ]);
@@ -902,6 +1284,7 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
           await showStickerAnimSheet(context, o);
           _commit();
         }));
+        items.add(_Tool(Icons.moving_rounded, 'Movimento', _motion));
         if (o.kind == OverlayKind.subtitle) {
           items.add(_Tool(Icons.format_paint_rounded, 'Stile a tutti', () => _styleAllSubtitles(o)));
           items.add(_Tool(Icons.layers_clear_rounded, 'Togli tutti', () {
@@ -913,6 +1296,43 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
           items.add(_Tool(Icons.copy_rounded, 'Duplica', _duplicateOverlay));
         }
         items.add(_Tool(Icons.delete_outline_rounded, 'Elimina', _deleteSelected));
+      case SelectionKind.pip:
+        final l = _p.pips[_selection.index];
+        items.addAll([
+          _Tool(Icons.interests_rounded, 'Maschera', () => _editPip((l) => showMaskSheet(context, l))),
+          _Tool(Icons.format_color_reset_rounded, 'Chroma key', () => _editPip((l) => showChromaSheet(context, l))),
+          _Tool(Icons.opacity_rounded, 'Opacità', () => _editPip((l) => showOpacitySheet(context, l))),
+          _Tool(Icons.moving_rounded, 'Movimento', _motion),
+          if (l.hasAudio)
+            _Tool(Icons.volume_up_rounded, 'Volume', () => _editPip((l) => showVolumeSheet(context,
+                title: 'Volume sovrapposizione', value: l.volume, onChanged: (v) => l.volume = v))),
+          _Tool(Icons.copy_rounded, 'Duplica', () {
+            _p.pips.add(l.copy()..cx = (l.cx + 0.08).clamp(0.0, 1.0));
+            _selection = Selection(SelectionKind.pip, _p.pips.length - 1);
+            _commit();
+          }),
+          _Tool(Icons.delete_outline_rounded, 'Elimina', _deleteSelected),
+        ]);
+      case SelectionKind.audio:
+        final a = _p.audios[_selection.index];
+        items.addAll([
+          _Tool(Icons.volume_up_rounded, 'Volume', () async {
+            await _pause();
+            if (!mounted) return;
+            await showVolumeSheet(context, title: 'Volume', value: a.volume, onChanged: (v) => a.volume = v);
+            _commit();
+          }),
+          _Tool(Icons.record_voice_over_rounded, 'Effetti voce', () async {
+            await _pause();
+            if (!mounted) return;
+            await showAudioFxSheet(context, value: a.fx, denoise: a.denoise, onChanged: (fx, dn) {
+              a.fx = fx;
+              a.denoise = dn;
+            });
+            _commit();
+          }),
+          _Tool(Icons.delete_outline_rounded, 'Elimina', _deleteSelected),
+        ]);
       case SelectionKind.music:
         final m = _p.music!;
         items.addAll([

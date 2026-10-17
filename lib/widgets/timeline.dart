@@ -6,7 +6,7 @@ import 'package:path/path.dart' as p;
 
 import '../models/project.dart';
 
-enum SelectionKind { none, clip, overlay, music, transition }
+enum SelectionKind { none, clip, overlay, music, transition, pip, audio }
 
 class Selection {
   const Selection(this.kind, [this.index = -1]);
@@ -17,6 +17,8 @@ class Selection {
   bool isClip(int i) => kind == SelectionKind.clip && index == i;
   bool isOverlay(int i) => kind == SelectionKind.overlay && index == i;
   bool isTransition(int i) => kind == SelectionKind.transition && index == i;
+  bool isPip(int i) => kind == SelectionKind.pip && index == i;
+  bool isAudio(int i) => kind == SelectionKind.audio && index == i;
   bool get isMusic => kind == SelectionKind.music;
   bool get isNone => kind == SelectionKind.none;
 
@@ -199,6 +201,12 @@ class _TimelineState extends State<Timeline> {
     y += math.max(1, textLanes) * (_laneH + 2) + _gap;
     final subTop = y;
     if (subLanes > 0) y += _laneH + _gap;
+    final pipLanes = _timeLanes([for (final l in _p.pips) (l.start, l.end)]);
+    final pipTop = y;
+    if (_p.pips.isNotEmpty) y += (pipLanes.reduce(math.max) + 1) * (_laneH + 2) + _gap;
+    final audioLanes = _timeLanes([for (final a in _p.audios) (a.start, a.end)]);
+    final audioTop = y;
+    if (_p.audios.isNotEmpty) y += (audioLanes.reduce(math.max) + 1) * (_laneH + 2) + _gap;
     final musicTop = y;
     y += _laneH + 4;
     final height = y;
@@ -292,6 +300,64 @@ class _TimelineState extends State<Timeline> {
     for (final i in subIdx) {
       children.add(_overlayBlock(i, half, subTop, const Color(0xFFFFE14D), _p.overlays[i].text));
     }
+    // Sovrapposizioni (PiP).
+    for (var k = 0; k < _p.pips.length; k++) {
+      final l = _p.pips[k];
+      children.add(_timeBlock(
+        half: half,
+        top: pipTop + pipLanes[k] * (_laneH + 2),
+        start: l.start,
+        end: l.end,
+        color: const Color(0xFF4FA3FF),
+        label: '${l.isImage ? '🖼' : '▣'}  ${p.basename(l.path)}',
+        selected: widget.selection.isPip(k),
+        onTap: () => widget.onSelect(Selection(SelectionKind.pip, k)),
+        move: (d) {
+          var s = l.start + d;
+          if (s < Duration.zero) s = Duration.zero;
+          if (s > _p.totalDuration - const Duration(milliseconds: 300)) {
+            s = _p.totalDuration - const Duration(milliseconds: 300);
+          }
+          l.start = s;
+        },
+        resize: (d, atStart) {
+          const minLen = Duration(milliseconds: 300);
+          if (atStart) {
+            // Accorcia/allunga dall'inizio tenendo ferma la fine.
+            var ts = l.trimStart + d;
+            if (ts < Duration.zero) ts = Duration.zero;
+            if (ts > l.trimEnd - minLen) ts = l.trimEnd - minLen;
+            l.start += ts - l.trimStart;
+            l.trimStart = ts;
+          } else {
+            var te = l.trimEnd + d;
+            final max = l.isImage ? const Duration(minutes: 10) : l.sourceDuration;
+            if (te > max) te = max;
+            if (te < l.trimStart + minLen) te = l.trimStart + minLen;
+            l.trimEnd = te;
+          }
+        },
+      ));
+    }
+    // Voci fuori campo ed effetti sonori.
+    for (var k = 0; k < _p.audios.length; k++) {
+      final a = _p.audios[k];
+      children.add(_timeBlock(
+        half: half,
+        top: audioTop + audioLanes[k] * (_laneH + 2),
+        start: a.start,
+        end: a.end,
+        color: const Color(0xFFFF9F43),
+        label: a.isVoice ? '🎙  Voce ${k + 1}' : '🔊  ${p.basename(a.path)}',
+        selected: widget.selection.isAudio(k),
+        onTap: () => widget.onSelect(Selection(SelectionKind.audio, k)),
+        move: (d) {
+          var s = a.start + d;
+          if (s < Duration.zero) s = Duration.zero;
+          a.start = s;
+        },
+      ));
+    }
     // Musica.
     if (_p.music != null) {
       children.add(_block(
@@ -358,6 +424,89 @@ class _TimelineState extends State<Timeline> {
           ],
         ),
       ),
+    );
+  }
+
+  /// Corsie per elementi (inizio, fine) che si sovrappongono nel tempo.
+  List<int> _timeLanes(List<(Duration, Duration)> items) {
+    final lanes = List<int>.filled(items.length, 0);
+    final order = List<int>.generate(items.length, (i) => i)
+      ..sort((a, b) => items[a].$1.compareTo(items[b].$1));
+    final ends = <Duration>[];
+    for (final i in order) {
+      var lane = ends.indexWhere((e) => e <= items[i].$1);
+      if (lane < 0) {
+        lane = ends.length;
+        ends.add(items[i].$2);
+      } else {
+        ends[lane] = items[i].$2;
+      }
+      lanes[i] = lane;
+    }
+    return lanes;
+  }
+
+  /// Blocco generico spostabile nel tempo (e ridimensionabile se [resize]).
+  Widget _timeBlock({
+    required double half,
+    required double top,
+    required Duration start,
+    required Duration end,
+    required Color color,
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+    required void Function(Duration delta) move,
+    void Function(Duration delta, bool atStart)? resize,
+  }) {
+    final body = GestureDetector(
+      onTap: onTap,
+      onHorizontalDragUpdate: selected
+          ? (d) {
+              move(_dur(d.delta.dx));
+              widget.onChanged();
+            }
+          : null,
+      onHorizontalDragEnd: selected ? (_) => widget.onCommit() : null,
+      child: Container(
+        width: math.max(10, _px(end - start)),
+        height: _laneH,
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        alignment: Alignment.centerLeft,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(5),
+          border: Border.all(color: selected ? Colors.white : Colors.transparent, width: 2),
+        ),
+        child: Text(label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.black)),
+      ),
+    );
+    Widget handle(bool atStart) => GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragUpdate: (d) {
+            resize!(_dur(d.delta.dx), atStart);
+            widget.onChanged();
+          },
+          onHorizontalDragEnd: (_) => widget.onCommit(),
+          child: Container(
+            width: 12,
+            height: _laneH,
+            color: Colors.white,
+            child: const Icon(Icons.drag_indicator_rounded, size: 10, color: Colors.black),
+          ),
+        );
+    final handles = selected && resize != null;
+    return Positioned(
+      left: half + _px(start) - (handles ? 12 : 0),
+      top: top,
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (handles) handle(true),
+        body,
+        if (handles) handle(false),
+      ]),
     );
   }
 

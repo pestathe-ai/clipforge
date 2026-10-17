@@ -44,6 +44,10 @@ jobs:
           ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=720x1280:rate=25 -t 4 -c:v libx264 b.mp4
           ffmpeg -loglevel error -y -f lavfi -i sine=f=220 -t 3 m.mp3
           ffmpeg -loglevel error -y -f lavfi -i "color=c=red@0.8:s=300x100,format=rgba" -frames:v 1 ov.png
+          ffmpeg -loglevel error -y -f lavfi -i "testsrc2=s=800x600" -frames:v 1 photo.jpg
+          ffmpeg -loglevel error -y -f lavfi -i "color=c=0x00ff00:s=640x360:r=30" -f lavfi -i "testsrc=s=320x180:r=30" -f lavfi -i sine=f=300 -filter_complex "[0][1]overlay=160:90,format=yuv420p[v]" -map "[v]" -map 2:a -t 4 -c:v libx264 -c:a aac green.mp4
+          ffmpeg -loglevel error -y -f lavfi -i sine=f=600 -t 2 -c:a aac voice.m4a
+          ffmpeg -loglevel error -y -f lavfi -i "color=c=white:s=200x200" -frames:v 1 mask.png
 
       - name: Test (genera anche i comandi FFmpeg completi)
         env:
@@ -94,6 +98,15 @@ jobs:
             exit 1
           fi
 
+      - name: Firma gli APK con la chiave fissa (aggiornamenti senza disinstallare)
+        run: |
+          APKSIGNER=$(ls -d $ANDROID_HOME/build-tools/*/ | sort -V | tail -1)apksigner
+          for apk in build/app/outputs/flutter-apk/*-release.apk; do
+            "$APKSIGNER" sign --ks tool/signing/clipforge.jks --ks-key-alias clipforge \
+              --ks-pass pass:At4VOzaN2pAA7rpPNj8kMUw0 --key-pass pass:At4VOzaN2pAA7rpPNj8kMUw0 "$apk"
+            "$APKSIGNER" verify "$apk"
+          done
+
       - name: Pubblica come release scaricabile dal telefono
         uses: softprops/action-gh-release@v2
         with:
@@ -101,4 +114,6 @@ jobs:
           name: ClipForge build ${{ github.run_number }}
           body: |
             Per quasi tutti i telefoni Android recenti scarica **app-arm64-v8a-release.apk**.
+            Da questa versione gli aggiornamenti si installano sopra la precedente
+            (se hai una build più vecchia della 5, disinstallala una volta).
           files: build/app/outputs/flutter-apk/*-release.apk

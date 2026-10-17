@@ -136,9 +136,10 @@ class OverlaysPainter extends CustomPainter {
       if (!o.visibleAt(time)) continue;
       final a = o.animAt(t);
       final layout = OverlayLayout(o, scale: scale, frameWidth: frameWidth);
+      final base = o.centerAt(time);
       final center = Offset(
-        (o.cx + a.dx) * size.width,
-        (o.cy + a.dy) * size.height,
+        (base.dx + a.dx) * size.width,
+        (base.dy + a.dy) * size.height,
       );
       layout.paint(canvas, center, opacity: a.opacity);
       if (identical(o, selected)) {

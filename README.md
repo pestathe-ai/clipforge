@@ -17,6 +17,19 @@ Flutter e usa FFmpeg per l'esportazione.
 - **Formati**: 9:16, 1:1, 16:9 e 4:5, con sfondo sfocato, nero o bianco ai lati.
 - **Export**: MP4 1080p a 30 fps, salvato in galleria nell'album "ClipForge". Testi e sticker escono identici all'anteprima.
 
+### Novità v0.3
+
+- **Foto** come clip, con durata regolabile e zoom lento automatico.
+- **Sovrapposizioni** (picture-in-picture) di video e foto: le trascini, le ridimensioni con due dita, cambi l'opacità.
+- **Green screen** (chroma key) su verde, blu, nero e bianco.
+- **Maschere**: cerchio, arrotondata, cuore, stella, rombo.
+- **Keyframe di movimento** per testi, sticker e sovrapposizioni.
+- **Voce fuori campo** registrata mentre il video scorre, ed **effetti sonori** da file.
+- **Effetti voce**: scoiattolo, voce profonda, eco, radio, megafono, sala. C'è anche la **riduzione del rumore**.
+- **Al contrario**, **ruota** di 90°, 180° o 270°.
+- **7 modelli pronti**: Vlog, Sport, Cinematico, Ricordi, Retrò VHS, Social/Reel, Bianco e nero.
+- Gli aggiornamenti si installano sopra la versione precedente, grazie alla chiave di firma fissa.
+
 ## Avvio rapido
 
 Ti servono Flutter 3.27 o più recente, Android Studio e/o Xcode (per iOS
@@ -59,7 +72,8 @@ evita i problemi di escape) e `amix` con la musica.
 
 - Nell'anteprima le transizioni sono un taglio netto e alcuni effetti (glitch, VHS) sono approssimati. Nel video esportato escono completi.
 - La prima volta i sottotitoli devono scaricare il modello: circa 100–160 MB.
-- Mancano ancora: foto come clip, keyframe, maschere, chroma key, voce fuori campo registrata dall'app, riproduzione al contrario e modelli pronti.
+- Nell'anteprima il chroma key e gli effetti voce non si vedono e non si sentono: sono applicati al video esportato.
+- Mancano ancora: keyframe di zoom e rotazione, curve di velocità, tracciamento del movimento, rimozione dello sfondo con l'IA.
 
 ## Licenza
 

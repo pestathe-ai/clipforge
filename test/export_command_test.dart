@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:clipforge/models/project.dart';
 import 'package:clipforge/services/export_command.dart';
+import 'package:flutter/material.dart' show Color;
 import 'package:flutter_test/flutter_test.dart';
 
 Project sample() {
@@ -83,6 +84,21 @@ void main() {
     expect(back.encode(), p.encode());
   });
 
+  test('keyframe: movimento lineare e JSON delle novità v0.3', () {
+    final l = PipLayer(
+      path: '/x.mp4', isImage: false, sourceDuration: const Duration(seconds: 4),
+      width: 640, height: 360, hasAudio: false, start: const Duration(seconds: 1),
+      trimEnd: const Duration(seconds: 2), cx: 0.2, toCx: 0.6);
+    expect(l.centerAt(const Duration(seconds: 2)).dx, closeTo(0.4, 1e-9));
+    expect(l.pixelSize(1080), (540, 304));
+    final p = sample()..pips.add(l)..audios.add(AudioItem(path: '/v.m4a', start: Duration.zero, duration: const Duration(seconds: 1)));
+    expect(Project.decode(p.encode()).encode(), p.encode());
+    final args = ExportCommand(project: p, outputPath: '/o.mp4', pipMasks: {0: '/m.png'}).build();
+    final graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph, contains('alphamerge'));
+    expect(graph, contains('adelay=0|0'));
+  });
+
   test('progetto vuoto lancia un errore', () {
     expect(() => ExportCommand(project: Project(), outputPath: '/o.mp4').build(), throwsStateError);
   });
@@ -99,6 +115,12 @@ void main() {
       final n = transitions.length;
       for (var i = 0; i < n; i++) {
         final withAudio = i.isEven;
+        if (i == 3) {
+          p.clips.add(VideoClip.image('$dir/photo.jpg', duration: const Duration(seconds: 2))
+            ..transition = transitions[i]
+            ..quarterTurns = 1);
+          continue;
+        }
         p.clips.add(VideoClip(
           path: '$dir/${withAudio ? 'a' : 'b'}.mp4',
           sourceDuration: const Duration(seconds: 4),
@@ -110,8 +132,47 @@ void main() {
           filter: VideoFilter.values[i % VideoFilter.values.length],
           transition: transitions[i],
           transitionDuration: const Duration(milliseconds: 400),
+          quarterTurns: i % 4,
+          denoise: i == 2,
+          voiceFx: withAudio ? AudioFx.values[i % AudioFx.values.length] : AudioFx.none,
         ));
       }
+      // Sovrapposizioni: video con green screen + maschera + movimento, foto.
+      p.pips.addAll([
+        PipLayer(
+          path: '$dir/green.mp4',
+          isImage: false,
+          sourceDuration: const Duration(seconds: 4),
+          width: 640,
+          height: 360,
+          hasAudio: true,
+          start: const Duration(seconds: 1),
+          trimStart: const Duration(milliseconds: 500),
+          trimEnd: const Duration(milliseconds: 3500),
+          mask: MaskShape.circle,
+          chroma: const Color(0xFF00FF00),
+          opacity: 0.8,
+          toCx: 0.8,
+          toCy: 0.6,
+        ),
+        PipLayer(
+          path: '$dir/photo.jpg',
+          isImage: true,
+          sourceDuration: const Duration(minutes: 10),
+          width: 800,
+          height: 600,
+          hasAudio: false,
+          start: const Duration(seconds: 5),
+          trimEnd: const Duration(seconds: 2),
+          scale: 0.3,
+        ),
+      ]);
+      p.audios.addAll([
+        AudioItem(path: '$dir/voice.m4a', start: const Duration(milliseconds: 1500),
+            duration: const Duration(seconds: 2), fx: AudioFx.echo, denoise: true),
+        AudioItem(path: '$dir/voice.m4a', start: const Duration(seconds: 6),
+            duration: const Duration(seconds: 2), isVoice: false, fx: AudioFx.chipmunk),
+      ]);
       p.music = MusicTrack(path: '$dir/m.mp3', duration: const Duration(seconds: 3));
       final overlays = <RenderedOverlay>[];
       var k = 0;
@@ -133,6 +194,7 @@ void main() {
         project: p,
         outputPath: '$dir/out_${bg.name}.mp4',
         overlays: overlays,
+        pipMasks: {0: '$dir/mask.png'},
         preset: 'ultrafast',
       ).build();
       File('$dir/args_${bg.name}.json').writeAsStringSync(jsonEncode(args));
