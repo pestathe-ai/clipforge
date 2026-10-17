@@ -57,15 +57,9 @@ evita i problemi di escape) e `amix` con la musica.
 
 ## Limiti noti e prossimi passi
 
-- Nell'anteprima le transizioni sono un taglio netto: le vedi solo nel video esportato.
-
-- Nell'anteprima la musica parte con il video, ma la sincronizzazione è
-  approssimativa. L'export invece è preciso.
-- Il taglio si fa con gli slider. Le miniature dei fotogrammi sulla timeline
-  sono il prossimo passo naturale, per esempio con `FFmpegKit` e `-vf fps=1`.
-- Mancano ancora: transizioni (`xfade`/`acrossfade`), sticker, keyframe,
-  annulla/ripeti, salvataggio dei progetti e sottotitoli automatici
-  (whisper.cpp).
+- Nell'anteprima le transizioni sono un taglio netto e alcuni effetti (glitch, VHS) sono approssimati. Nel video esportato escono completi.
+- La prima volta i sottotitoli devono scaricare il modello: circa 100–160 MB.
+- Mancano ancora: foto come clip, keyframe, maschere, chroma key, voce fuori campo registrata dall'app, riproduzione al contrario e modelli pronti.
 
 ## Licenza
 
