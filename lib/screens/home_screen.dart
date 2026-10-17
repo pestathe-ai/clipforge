@@ -1,100 +1,137 @@
 import 'package:flutter/material.dart';
 
 import '../models/project.dart';
+import '../state/history.dart';
 import 'editor_screen.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  Project? _last;
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  Future<void> _reload() async {
+    final p = await ProjectStore.load();
+    if (mounted) setState(() => _last = p);
+  }
+
+  Future<void> _open(Project p, {bool pick = true}) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => EditorScreen(project: p, pickOnStart: pick)),
+    );
+    _reload();
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final accent = theme.colorScheme.primary;
+    final last = _last;
     return Scaffold(
       body: SafeArea(
-        child: Padding(
+        child: ListView(
           padding: const EdgeInsets.all(24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Spacer(),
-              Icon(Icons.movie_filter_rounded,
-                  size: 56, color: theme.colorScheme.primary),
-              const SizedBox(height: 16),
-              Text('ClipForge',
-                  style: theme.textTheme.displaySmall
-                      ?.copyWith(fontWeight: FontWeight.w800)),
-              const SizedBox(height: 8),
-              Text(
-                'Taglia, unisci, aggiungi testi, filtri e musica. '
-                'Tutto sul telefono, tutto open source.',
-                style: theme.textTheme.bodyLarge
-                    ?.copyWith(color: Colors.white70),
+          children: [
+            const SizedBox(height: 24),
+            Icon(Icons.movie_filter_rounded, size: 52, color: accent),
+            const SizedBox(height: 12),
+            Text('ClipForge',
+                style: theme.textTheme.displaySmall?.copyWith(fontWeight: FontWeight.w800)),
+            const SizedBox(height: 6),
+            Text('Editor video open source',
+                style: theme.textTheme.bodyLarge?.copyWith(color: Colors.white60)),
+            const SizedBox(height: 32),
+
+            // Nuovo progetto (grande, come CapCut).
+            Material(
+              color: accent,
+              borderRadius: BorderRadius.circular(18),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(18),
+                onTap: () => _open(Project()),
+                child: const SizedBox(
+                  height: 110,
+                  child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    Icon(Icons.add_circle_rounded, size: 36, color: Colors.black),
+                    SizedBox(width: 12),
+                    Text('Nuovo progetto',
+                        style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.black)),
+                  ]),
+                ),
               ),
-              const Spacer(),
-              Text('Nuovo progetto', style: theme.textTheme.titleMedium),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  for (final a in AspectRatioPreset.values)
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: _AspectCard(preset: a),
-                      ),
-                    ),
-                ],
+            ),
+
+            if (last != null) ...[
+              const SizedBox(height: 28),
+              Text('Riprendi', style: theme.textTheme.titleMedium),
+              const SizedBox(height: 10),
+              Material(
+                color: const Color(0xFF1C1D22),
+                borderRadius: BorderRadius.circular(14),
+                child: ListTile(
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  leading: const Icon(Icons.history_rounded),
+                  title: const Text('Ultimo progetto'),
+                  subtitle: Text('${last.clips.length} clip · ${_fmt(last.totalDuration)} · ${last.aspect.label}'),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => _open(last, pick: false),
+                ),
               ),
-              const SizedBox(height: 24),
             ],
-          ),
+
+            const SizedBox(height: 28),
+            Text('Cosa puoi fare', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 10),
+            const Wrap(spacing: 8, runSpacing: 8, children: [
+              _Feature(Icons.content_cut_rounded, 'Taglia e dividi'),
+              _Feature(Icons.compare_arrows_rounded, '12 transizioni'),
+              _Feature(Icons.auto_awesome_rounded, '10 effetti'),
+              _Feature(Icons.filter_vintage_rounded, '9 filtri'),
+              _Feature(Icons.title_rounded, 'Testi animati'),
+              _Feature(Icons.emoji_emotions_rounded, 'Sticker'),
+              _Feature(Icons.subtitles_rounded, 'Sottotitoli automatici'),
+              _Feature(Icons.music_note_rounded, 'Musica'),
+              _Feature(Icons.speed_rounded, 'Velocità'),
+              _Feature(Icons.undo_rounded, 'Annulla / ripeti'),
+            ]),
+          ],
         ),
       ),
     );
   }
+
+  static String _fmt(Duration d) =>
+      '${d.inMinutes}:${d.inSeconds.remainder(60).toString().padLeft(2, '0')}';
 }
 
-class _AspectCard extends StatelessWidget {
-  const _AspectCard({required this.preset});
-  final AspectRatioPreset preset;
+class _Feature extends StatelessWidget {
+  const _Feature(this.icon, this.label);
+  final IconData icon;
+  final String label;
 
   @override
   Widget build(BuildContext context) {
-    final color = Theme.of(context).colorScheme.primary;
-    return InkWell(
-      borderRadius: BorderRadius.circular(16),
-      onTap: () {
-        final project = Project()..aspect = preset;
-        Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => EditorScreen(project: project)),
-        );
-      },
-      child: Ink(
-        height: 120,
-        decoration: BoxDecoration(
-          color: const Color(0xFF1C1D22),
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            SizedBox(
-              height: 48,
-              child: AspectRatio(
-                aspectRatio: preset.ratio,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    border: Border.all(color: color, width: 2),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(preset.label,
-                style: const TextStyle(fontWeight: FontWeight.w600)),
-          ],
-        ),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1C1D22),
+        borderRadius: BorderRadius.circular(20),
       ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 16, color: Theme.of(context).colorScheme.primary),
+        const SizedBox(width: 6),
+        Text(label, style: const TextStyle(fontSize: 12)),
+      ]),
     );
   }
 }

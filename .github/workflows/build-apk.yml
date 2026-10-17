@@ -12,9 +12,9 @@ jobs:
   apk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -27,14 +27,66 @@ jobs:
       - name: Genera le cartelle Android/iOS e imposta minSdk 24
         run: ./tool/setup_platforms.sh
 
-      - name: Test
+      - name: Analisi statica
+        run: |
+          set -o pipefail
+          if ! flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee analyze.log; then
+            grep -E ' error ' analyze.log | head -40 | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}' > err.txt
+            echo "::error title=analyze::$(cat err.txt)"
+            exit 1
+          fi
+
+      - name: Prepara video di prova
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
+          mkdir -p /tmp/media && cd /tmp/media
+          ffmpeg -loglevel error -y -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=f=440 -t 4 -c:v libx264 -c:a aac -shortest a.mp4
+          ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=720x1280:rate=25 -t 4 -c:v libx264 b.mp4
+          ffmpeg -loglevel error -y -f lavfi -i sine=f=220 -t 3 m.mp3
+          ffmpeg -loglevel error -y -f lavfi -i "color=c=red@0.8:s=300x100,format=rgba" -frames:v 1 ov.png
+
+      - name: Test (genera anche i comandi FFmpeg completi)
+        env:
+          CLIPFORGE_MEDIA: /tmp/media
         run: flutter test
+
+      - name: Esegui gli export generati con FFmpeg vero
+        run: |
+          cd /tmp/media
+          for f in args_*.json; do
+            name=${f#args_}; name=${name%.json}
+            python3 - "$f" "$name" <<'EOF'
+          import json, subprocess, sys
+          args = json.load(open(sys.argv[1]))
+          r = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error'] + args, capture_output=True, text=True)
+          if r.returncode != 0:
+              msg = (r.stderr[-1500:]).replace('%', '%25').replace('\n', '%0A')
+              print(f"::error title=ffmpeg {sys.argv[2]}::{msg}")
+              sys.exit(1)
+          EOF
+            got=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out_$name.mp4)
+            want=$(cat expected_$name.txt)
+            python3 -c "import sys; g,w=float('$got'),float('$want'); print('$name', g, w); sys.exit(0 if abs(g-w)<0.2 else 1)" \
+              || { echo "::error title=durata $name::ottenuto $got, atteso $want"; exit 1; }
+          done
+
+      - name: Verifica che i modelli dei sottotitoli siano scaricabili
+        run: |
+          for m in tiny base; do
+            for f in encoder.int8.onnx decoder.int8.onnx tokens.txt; do
+              url="https://huggingface.co/csukuangfj/sherpa-onnx-whisper-$m/resolve/main/$m-$f"
+              size=$(curl -sfIL "$url" | grep -i '^content-length' | tail -1 | tr -dc 0-9)
+              [ -n "$size" ] || { echo "::error title=modello::$url non trovato"; exit 1; }
+              echo "$m-$f $((size/1048576)) MB"
+            done
+          done
+          curl -sfIL https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx > /dev/null \
+            || { echo "::error title=modello::silero_vad.onnx non trovato"; exit 1; }
 
       - name: Compila APK (uno per architettura, più leggeri)
         run: |
           set -o pipefail
           if ! flutter build apk --release --split-per-abi 2>&1 | tee build.log; then
-            # Riporta le righe d'errore come annotazioni (visibili dall'API).
             grep -n -i -E 'error|what went wrong|failed|exception|requires|> ' build.log \
               | grep -v -i 'deprecat' | tail -40 \
               | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}' > err.txt
