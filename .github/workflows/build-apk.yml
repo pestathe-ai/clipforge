@@ -31,7 +31,16 @@ jobs:
         run: flutter test
 
       - name: Compila APK (uno per architettura, più leggeri)
-        run: flutter build apk --release --split-per-abi
+        run: |
+          set -o pipefail
+          if ! flutter build apk --release --split-per-abi 2>&1 | tee build.log; then
+            # Riporta le righe d'errore come annotazioni (visibili dall'API).
+            grep -n -i -E 'error|what went wrong|failed|exception|requires|> ' build.log \
+              | grep -v -i 'deprecat' | tail -40 \
+              | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}' > err.txt
+            echo "::error::$(cat err.txt)"
+            exit 1
+          fi
 
       - name: Pubblica come release scaricabile dal telefono
         uses: softprops/action-gh-release@v2
