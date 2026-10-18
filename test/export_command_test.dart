@@ -121,7 +121,8 @@ void main() {
     final g = graph[graph.indexOf('-filter_complex') + 1];
     expect(g, contains('split=3'));
     expect(g, contains('asplit=3'));
-    expect(g, contains('atempo=0.7071,atempo=0.7071'));
+    expect(g, contains('atempo=0.5000'));
+    expect(g, contains('atempo=3.0000'));
   });
 
   test('progetto vuoto lancia un errore', () {
