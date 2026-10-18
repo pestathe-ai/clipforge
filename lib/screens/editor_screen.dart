@@ -15,6 +15,7 @@ import '../models/templates.dart';
 import '../render/mask_painter.dart';
 import '../render/overlay_painter.dart';
 import '../services/ffmpeg_service.dart';
+import '../services/ai_service.dart';
 import '../services/subtitle_service.dart';
 import '../state/history.dart';
 import '../state/layer_players.dart';
@@ -35,6 +36,9 @@ class EditorScreen extends StatefulWidget {
 class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderStateMixin {
   final _ffmpeg = FFmpegService();
   late final _subs = SubtitleService(_ffmpeg);
+  late final _ai = AiService(_ffmpeg);
+  double _gToScale = 1, _gToRot = 0;
+  double _appliedSpeed = 1;
   late Project _p = widget.project;
   late final _history = History(_p);
 
@@ -182,7 +186,8 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
       }
     }
     final c = _video!;
-    await c.setPlaybackSpeed(clip.speed);
+    _appliedSpeed = clip.speedAt(local);
+    await c.setPlaybackSpeed(_appliedSpeed);
     await c.setVolume(_recordingVoice ? 0 : clip.volume.clamp(0.0, 1.0));
     await c.seekTo(sourcePos);
     await _seekMusic(t);
@@ -221,7 +226,7 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
             key: a,
             path: a.path,
             start: a.start,
-            sourceStart: Duration.zero,
+            sourceStart: a.sourceStart,
             duration: a.duration,
             volume: _recordingVoice ? 0 : a.volume,
           ),
@@ -250,8 +255,13 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     final v = _video;
     if (v != null && v.value.isPlaying && !clip.isImage) {
       final real = _p.startOf(i) +
-          Duration(
-              microseconds: ((v.value.position - clip.trimStart).inMicroseconds / clip.speed).round());
+          clip.localAt(v.value.position);
+      // Curva di velocità: aggiorna la velocità del player quando cambia tratto.
+      final sp = clip.speedAt(est - _p.startOf(i));
+      if ((sp - _appliedSpeed).abs() > 0.01) {
+        _appliedSpeed = sp;
+        v.setPlaybackSpeed(sp);
+      }
       if ((real - est).abs() > const Duration(milliseconds: 250)) {
         _anchor = real;
         _anchorWall = _clock.elapsed;
@@ -328,6 +338,8 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
           path: path,
           sourceDuration: info.duration,
           hasAudio: info.hasAudio,
+          width: info.width,
+          height: info.height,
         ));
         added++;
         _loadThumbs(path);
@@ -675,6 +687,7 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
           'trimEnd': len.inMicroseconds,
           'reversed': true,
           'originalPath': c.originalPath ?? c.path,
+          'bgMask': null,
         });
       } else {
         final orig = c.originalPath ?? c.path;
@@ -687,6 +700,7 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
           'trimEnd': info.duration.inMicroseconds,
           'reversed': false,
           'originalPath': null,
+          'bgMask': null,
         });
       }
       _p.clips[i] = next;
@@ -719,12 +733,256 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
       if (pip != null) {
         pip.toCx = on ? (pip.cx > 0.5 ? pip.cx - 0.3 : pip.cx + 0.3) : null;
         pip.toCy = on ? pip.cy : null;
+        pip.toScale = on ? pip.scale : null;
+        pip.toRotation = on ? pip.rotation : null;
+        if (on) pip.track = null;
       } else if (ov != null) {
         ov.toCx = on ? (ov.cx > 0.5 ? ov.cx - 0.3 : ov.cx + 0.3) : null;
         ov.toCy = on ? ov.cy : null;
+        ov.toScale = on ? 1 : null;
+        ov.toRotation = on ? ov.rotation : null;
+        if (on) ov.track = null;
       }
     });
     _commit();
+  }
+
+  // ───────────────────────── Novità v0.4 ─────────────────────────
+
+  /// Fermo immagine: divide la clip alla testina e inserisce 2 s di foto.
+  Future<void> _freezeFrame() async {
+    if (_p.clips.isEmpty) return;
+    await _pause();
+    final i = _targetClip;
+    final c = _p.clips[i];
+    final local = _position - _p.startOf(i);
+    setState(() => _busy = 'Creo il fermo immagine…');
+    try {
+      String? jpg;
+      if (c.isImage) {
+        jpg = c.path;
+      } else {
+        final docs = await getApplicationDocumentsDirectory();
+        final out = p.join(docs.path, 'media', 'freeze_${DateTime.now().millisecondsSinceEpoch}.jpg');
+        await Directory(p.dirname(out)).create(recursive: true);
+        jpg = await _ffmpeg.frameAt(c, local, out);
+      }
+      if (jpg == null) return _toast('Non riesco a leggere il fotogramma');
+      final freeze = VideoClip.image(jpg, duration: const Duration(seconds: 2))
+        ..effect = ClipEffect.none
+        ..filter = c.filter
+        ..adjust = c.adjust
+        ..quarterTurns = c.quarterTurns
+        ..cropZoom = c.cropZoom
+        ..cropX = c.cropX
+        ..cropY = c.cropY;
+      _thumbs[jpg] = [jpg];
+      final cut = c.sourceAt(local);
+      const minLen = Duration(milliseconds: 200);
+      if (!c.isImage && cut - c.trimStart > minLen && c.trimEnd - cut > minLen) {
+        final second = c.copy()..trimStart = cut;
+        c
+          ..trimEnd = cut
+          ..transition = TransitionType.none;
+        _p.clips.insert(i + 1, freeze);
+        _p.clips.insert(i + 2, second);
+      } else {
+        _p.clips.insert(i + 1, freeze);
+      }
+      _selection = Selection(SelectionKind.clip, i + 1);
+      _commit();
+    } finally {
+      if (mounted) setState(() => _busy = null);
+    }
+  }
+
+  /// Estrai audio: sposta l'audio della clip su una traccia separata.
+  void _extractAudio() {
+    final i = _targetClip;
+    final c = _p.clips[i];
+    if (!c.hasAudio || c.isImage) return _toast('Questa clip non ha audio');
+    if ((c.speed - 1).abs() > 0.01 || c.speedCurve != SpeedCurve.none) {
+      return _toast('Riporta la velocità a 1x prima di estrarre l\'audio');
+    }
+    _p.audios.add(AudioItem(
+      path: c.path,
+      start: _p.startOf(i),
+      duration: c.trimEnd - c.trimStart,
+      sourceStart: c.trimStart,
+      volume: c.volume,
+      isVoice: false,
+    ));
+    c.volume = 0;
+    _selection = Selection(SelectionKind.audio, _p.audios.length - 1);
+    _commit();
+    _toast('Audio estratto: ora puoi spostarlo e modificarlo da solo');
+  }
+
+  /// Rimozione dello sfondo con l'IA (clip principale o sovrapposizione).
+  Future<void> _removeBackground() async {
+    await _pause();
+    final isPip = _selection.kind == SelectionKind.pip;
+    final pip = isPip ? _p.pips[_selection.index] : null;
+    final clip = isPip ? null : _p.clips[_targetClip];
+    final current = pip?.bgMask ?? clip?.bgMask;
+    if (current != null) {
+      pip?.bgMask = null;
+      clip?.bgMask = null;
+      _commit();
+      return _toast('Sfondo ripristinato');
+    }
+    final path = pip?.path ?? clip!.path;
+    final isImage = pip?.isImage ?? clip!.isImage;
+    if (isImage) return _toast('Per ora la rimozione dello sfondo funziona sui video');
+    final dur = pip?.sourceDuration ?? clip!.sourceDuration;
+    if (dur > const Duration(minutes: 3)) return _toast('Video troppo lungo: massimo 3 minuti');
+    if (clip != null && (clip.width <= 0 || clip.height <= 0)) {
+      final info = await _ffmpeg.probe(clip.path);
+      clip
+        ..width = info.width
+        ..height = info.height;
+    }
+    if (!mounted) return;
+    var cancelled = false;
+    final progress = ValueNotifier<double>(0);
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rimuovo lo sfondo'),
+        content: ValueListenableBuilder<double>(
+          valueListenable: progress,
+          builder: (_, v, __) => Column(mainAxisSize: MainAxisSize.min, children: [
+            LinearProgressIndicator(value: v),
+            const SizedBox(height: 12),
+            Text('${(v * 100).round()}%'),
+            const SizedBox(height: 4),
+            const Text('L\'IA cerca le persone in ogni fotogramma.',
+                style: TextStyle(fontSize: 12, color: Colors.white54)),
+          ]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              cancelled = true;
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Annulla'),
+          ),
+        ],
+      ),
+    );
+    try {
+      final mask = await _ai.removeBackground(path, dur,
+          onProgress: (v) => progress.value = v, cancelled: () => cancelled);
+      if (!mounted || cancelled) return;
+      Navigator.of(context).pop();
+      if (mask == null) return _toast('Non sono riuscito a trovare una persona nel video');
+      pip?.bgMask = mask;
+      clip?.bgMask = mask;
+      _commit();
+      _toast(isPip
+          ? 'Sfondo rimosso: si vedrà nel video esportato'
+          : 'Sfondo rimosso: dietro la persona c\'è lo sfondo scelto in "Formato"');
+    } catch (e) {
+      if (mounted && !cancelled) Navigator.of(context).pop();
+      _toast('Errore: $e');
+    } finally {
+      progress.dispose();
+    }
+  }
+
+  /// Tracciamento: l'elemento selezionato segue l'oggetto che ha sotto.
+  Future<void> _trackSelected() async {
+    await _pause();
+    final isPip = _selection.kind == SelectionKind.pip;
+    final pip = isPip ? _p.pips[_selection.index] : null;
+    final ov = isPip ? null : _p.overlays[_selection.index];
+    if ((pip?.track ?? ov?.track) != null) {
+      pip?.track = null;
+      ov?.track = null;
+      _commit();
+      return _toast('Tracciamento rimosso');
+    }
+    final start = pip?.start ?? ov!.start;
+    final end = pip?.end ?? ov!.end;
+    final ci = _p.clipIndexAt(start);
+    final c = _p.clips[ci];
+    if (c.isImage) return _toast('Il tracciamento funziona sopra un video');
+    if (c.width <= 0 || c.height <= 0) {
+      final info = await _ffmpeg.probe(c.path);
+      c
+        ..width = info.width
+        ..height = info.height;
+    }
+    // Geometria della clip nel fotogramma finale (rotazione, ritaglio, adattamento).
+    final odd = c.quarterTurns.isOdd;
+    final sw = (odd ? c.height : c.width).toDouble(), sh = (odd ? c.width : c.height).toDouble();
+    final vw = sw / c.cropZoom, vh = sh / c.cropZoom;
+    final cw = _p.aspect.width.toDouble(), ch = _p.aspect.height.toDouble();
+    final sc = math.min(cw / vw, ch / vh);
+    final ox = (cw - vw * sc) / 2, oy = (ch - vh * sc) / 2;
+    final pos = (pip?.centerAt(start) ?? ov!.centerAt(start));
+    final fx = ((pos.dx * cw - ox) / (vw * sc)).clamp(0.02, 0.98);
+    final fy = ((pos.dy * ch - oy) / (vh * sc)).clamp(0.02, 0.98);
+
+    final clipEnd = _p.startOf(ci) + c.outputDuration;
+    final len = (end < clipEnd ? end : clipEnd) - start;
+    if (len < const Duration(milliseconds: 500)) return _toast('L\'elemento è troppo corto per il tracciamento');
+
+    final vf = <String>[
+      if (c.quarterTurns % 4 == 1) 'transpose=1',
+      if (c.quarterTurns % 4 == 2) 'hflip,vflip',
+      if (c.quarterTurns % 4 == 3) 'transpose=2',
+      if (c.hasCrop)
+        "crop=w='trunc(iw/${c.cropZoom}/2)*2':h='trunc(ih/${c.cropZoom}/2)*2'"
+            ":x='(iw-ow)*${0.5 + c.cropX / 2}':y='(ih-oh)*${0.5 + c.cropY / 2}'",
+    ].join(',');
+
+    setState(() => _busy = 'Seguo il movimento…');
+    try {
+      final path = await _ai.track(
+        c.path,
+        start: c.sourceAt(start - _p.startOf(ci)),
+        duration: len,
+        x: fx,
+        y: fy,
+        srcWidth: vw.round(),
+        srcHeight: vh.round(),
+        speed: c.speed,
+        extraVf: vf,
+      );
+      if (path == null || path.length < 6) return _toast('Non sono riuscito a seguire l\'oggetto');
+      // Coordinate della clip → coordinate del fotogramma finale.
+      for (var k = 0; k + 2 < path.length; k += 3) {
+        path[k + 1] = (ox + path[k + 1] * vw * sc) / cw;
+        path[k + 2] = (oy + path[k + 2] * vh * sc) / ch;
+      }
+      if (pip != null) {
+        pip
+          ..track = path
+          ..toCx = null
+          ..toCy = null;
+      } else {
+        ov!
+          ..track = path
+          ..toCx = null
+          ..toCy = null;
+      }
+      _commit();
+      _toast('Fatto: l\'elemento segue l\'oggetto');
+    } catch (e) {
+      _toast('Errore: $e');
+    } finally {
+      if (mounted) setState(() => _busy = null);
+    }
+  }
+
+  void _toggleStabilize() {
+    final c = _p.clips[_targetClip];
+    c.stabilize = !c.stabilize;
+    _commit();
+    _toast(c.stabilize ? 'Stabilizzazione attiva (nel video esportato)' : 'Stabilizzazione disattivata');
   }
 
   // ───────────────────────── Esportazione ─────────────────────────
@@ -733,6 +991,9 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     if (_p.clips.isEmpty) return _toast('Non c\'è niente da esportare');
     await _pause();
     if (!mounted) return;
+    final go = await showExportSheet(context, _p);
+    _history.commit(_p);
+    if (go != true || !mounted) return;
     final progress = ValueNotifier<double>(0);
     showDialog<void>(
       context: context,
@@ -898,6 +1159,16 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
       media = const SizedBox(width: 16, height: 9);
     }
     if (clip.quarterTurns % 4 != 0) media = RotatedBox(quarterTurns: clip.quarterTurns, child: media);
+    if (clip.hasCrop) {
+      media = ClipRect(
+        child: Align(
+          alignment: Alignment(clip.cropX, clip.cropY),
+          widthFactor: 1 / clip.cropZoom,
+          heightFactor: 1 / clip.cropZoom,
+          child: media,
+        ),
+      );
+    }
 
     final fg = FittedBox(fit: BoxFit.contain, child: media);
     final Widget bg = switch (_p.background) {
@@ -912,6 +1183,9 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     };
 
     Widget frame = Stack(fit: StackFit.expand, children: [bg, fg]);
+    if (!clip.adjust.isNeutral) {
+      frame = ColorFiltered(colorFilter: ColorFilter.matrix(clip.adjust.matrix), child: frame);
+    }
     final m = clip.filter.previewMatrix;
     if (m != null) frame = ColorFiltered(colorFilter: ColorFilter.matrix(m), child: frame);
     frame = _applyEffect(clip.effect, frame, localS, durS);
@@ -960,7 +1234,7 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
   }
 
   Rect _pipRect(PipLayer l, Size size) {
-    final w = size.width * l.scale;
+    final w = size.width * l.scaleAt(_position);
     final h = w * l.height / l.width;
     final c = l.centerAt(_position);
     return Rect.fromCenter(center: Offset(c.dx * size.width, c.dy * size.height), width: w, height: h);
@@ -986,19 +1260,22 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     return Positioned.fromRect(
       rect: r,
       child: IgnorePointer(
-        child: Opacity(
+        child: Transform.rotate(
+          angle: l.rotationAt(_position),
+          child: Opacity(
           opacity: l.opacity,
           child: Stack(fit: StackFit.expand, children: [
             content,
             if (selected)
               DecoratedBox(decoration: BoxDecoration(border: Border.all(color: Colors.white, width: 1.5))),
-            if (l.chroma != null)
+            if (l.chroma != null || l.bgMask != null)
               const Positioned(
                 left: 4,
                 top: 4,
-                child: Icon(Icons.format_color_reset_rounded, size: 14, color: Colors.white70),
+                child: Icon(Icons.auto_fix_high_rounded, size: 14, color: Colors.white70),
               ),
           ]),
+          ),
         ),
       ),
     );
@@ -1137,6 +1414,8 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
       final o = _p.overlays[_selection.index];
       _gFont = o.fontSize;
       _gRot = o.rotation;
+      _gToScale = o.toScale ?? 1;
+      _gToRot = o.toRotation ?? o.rotation;
       toCx = o.toCx;
       toCy = o.toCy;
       start = o.start;
@@ -1146,6 +1425,9 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     } else {
       final l = _p.pips[_selection.index];
       _gScale = l.scale;
+      _gRot = l.rotation;
+      _gToScale = l.toScale ?? l.scale;
+      _gToRot = l.toRotation ?? l.rotation;
       toCx = l.toCx;
       toCy = l.toCy;
       start = l.start;
@@ -1179,8 +1461,13 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
           o.cy = ny;
         }
         if (d.pointerCount > 1) {
-          o.fontSize = (_gFont * d.scale).clamp(20.0, 600.0);
-          o.rotation = _gRot + d.rotation;
+          if (_gEditEnd) {
+            o.toScale = (_gToScale * d.scale).clamp(0.1, 8.0);
+            o.toRotation = _gToRot + d.rotation;
+          } else {
+            o.fontSize = (_gFont * d.scale).clamp(20.0, 600.0);
+            o.rotation = _gRot + d.rotation;
+          }
         }
       } else {
         final l = _p.pips[_selection.index];
@@ -1191,7 +1478,15 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
           l.cx = nx;
           l.cy = ny;
         }
-        if (d.pointerCount > 1) l.scale = (_gScale * d.scale).clamp(0.08, 1.6);
+        if (d.pointerCount > 1) {
+          if (_gEditEnd) {
+            l.toScale = (_gToScale * d.scale).clamp(0.08, 1.6);
+            l.toRotation = _gToRot + d.rotation;
+          } else {
+            l.scale = (_gScale * d.scale).clamp(0.08, 1.6);
+            l.rotation = _gRot + d.rotation;
+          }
+        }
       }
     });
   }
@@ -1252,7 +1547,32 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
             _Tool(Icons.timer_rounded, 'Durata', () => _editClip((c) => showImageDurationSheet(context, c)))
           else
             _Tool(Icons.speed_rounded, 'Velocità', () => _editClip((c) => showSpeedSheet(context, c))),
+          if (!clip.isImage)
+            _Tool(Icons.show_chart_rounded, 'Curva', () => _editClip((c) => showSpeedCurveSheet(context, c))),
           _Tool(Icons.auto_awesome_rounded, 'Effetti', () => _editClip((c) => showEffectSheet(context, c))),
+          _Tool(Icons.tune_rounded, 'Regola', () => _editClip((c) => showAdjustSheet(context, c,
+              onLive: () => setState(() {}),
+              applyToAll: () {
+                for (final x in _p.clips) {
+                  x.adjust = c.adjust;
+                }
+                Navigator.pop(context, true);
+              }))),
+          _Tool(Icons.crop_free_rounded, 'Ritaglia', () => _editClip((c) => showCropSheet(context, c, onLive: () => setState(() {})))),
+          _Tool(Icons.pause_presentation_rounded, 'Fermo immagine', _freezeFrame),
+          if (!clip.isImage) ...[
+            _Tool(clip.bgMask != null ? Icons.person_off_rounded : Icons.person_remove_rounded,
+                clip.bgMask != null ? 'Ripristina sfondo' : 'Rimuovi sfondo', _removeBackground),
+            _Tool(Icons.video_stable_rounded, clip.stabilize ? 'Stabile ✓' : 'Stabilizza', _toggleStabilize),
+          ],
+          if (clip.hasAudio && !clip.isImage) ...[
+            _Tool(Icons.call_split_rounded, 'Estrai audio', _extractAudio),
+            _Tool(Icons.graphic_eq_rounded, 'Dissolvenza', () => _editClip((c) => showAudioFadeSheet(context,
+                fadeIn: c.fadeIn, fadeOut: c.fadeOut, onChanged: (a, b) {
+                  c.fadeIn = a;
+                  c.fadeOut = b;
+                }))),
+          ],
           _Tool(Icons.filter_vintage_rounded, 'Filtri', () => _editClip((c) => showFilterSheet(context, c, applyToAll: _filterAll(c)))),
           _Tool(Icons.rotate_right_rounded, 'Ruota', () => _editClip((c) => showRotateSheet(context, c))),
           if (!clip.isImage)
@@ -1285,6 +1605,7 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
           _commit();
         }));
         items.add(_Tool(Icons.moving_rounded, 'Movimento', _motion));
+        items.add(_Tool(Icons.my_location_rounded, o.track != null ? 'Togli tracciamento' : 'Traccia', _trackSelected));
         if (o.kind == OverlayKind.subtitle) {
           items.add(_Tool(Icons.format_paint_rounded, 'Stile a tutti', () => _styleAllSubtitles(o)));
           items.add(_Tool(Icons.layers_clear_rounded, 'Togli tutti', () {
@@ -1301,6 +1622,10 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
         items.addAll([
           _Tool(Icons.interests_rounded, 'Maschera', () => _editPip((l) => showMaskSheet(context, l))),
           _Tool(Icons.format_color_reset_rounded, 'Chroma key', () => _editPip((l) => showChromaSheet(context, l))),
+          if (!l.isImage)
+            _Tool(l.bgMask != null ? Icons.person_off_rounded : Icons.person_remove_rounded,
+                l.bgMask != null ? 'Ripristina sfondo' : 'Rimuovi sfondo', _removeBackground),
+          _Tool(Icons.my_location_rounded, l.track != null ? 'Togli tracciamento' : 'Traccia', _trackSelected),
           _Tool(Icons.opacity_rounded, 'Opacità', () => _editPip((l) => showOpacitySheet(context, l))),
           _Tool(Icons.moving_rounded, 'Movimento', _motion),
           if (l.hasAudio)
@@ -1328,6 +1653,15 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
             await showAudioFxSheet(context, value: a.fx, denoise: a.denoise, onChanged: (fx, dn) {
               a.fx = fx;
               a.denoise = dn;
+            });
+            _commit();
+          }),
+          _Tool(Icons.graphic_eq_rounded, 'Dissolvenza', () async {
+            await _pause();
+            if (!mounted) return;
+            await showAudioFadeSheet(context, fadeIn: a.fadeIn, fadeOut: a.fadeOut, onChanged: (x, y) {
+              a.fadeIn = x;
+              a.fadeOut = y;
             });
             _commit();
           }),

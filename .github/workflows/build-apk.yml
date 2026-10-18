@@ -48,6 +48,7 @@ jobs:
           ffmpeg -loglevel error -y -f lavfi -i "color=c=0x00ff00:s=640x360:r=30" -f lavfi -i "testsrc=s=320x180:r=30" -f lavfi -i sine=f=300 -filter_complex "[0][1]overlay=160:90,format=yuv420p[v]" -map "[v]" -map 2:a -t 4 -c:v libx264 -c:a aac green.mp4
           ffmpeg -loglevel error -y -f lavfi -i sine=f=600 -t 2 -c:a aac voice.m4a
           ffmpeg -loglevel error -y -f lavfi -i "color=c=white:s=200x200" -frames:v 1 mask.png
+          ffmpeg -loglevel error -y -f lavfi -i "color=c=white:s=256x144:r=15,format=gray" -t 5 -c:v libx264 -pix_fmt yuv420p maskvid.mp4
 
       - name: Test (genera anche i comandi FFmpeg completi)
         env:

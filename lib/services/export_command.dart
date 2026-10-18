@@ -26,9 +26,9 @@ class ExportCommand {
     required this.outputPath,
     this.overlays = const [],
     this.pipMasks = const {},
-    this.fps = 30,
+    int? fps,
     this.preset = 'veryfast',
-  });
+  }) : fps = fps ?? project.fps;
 
   final Project project;
   final String outputPath;
@@ -46,7 +46,8 @@ class ExportCommand {
   List<String> build() {
     final p = project;
     if (p.clips.isEmpty) throw StateError('Il progetto non contiene clip.');
-    final w = p.aspect.width, h = p.aspect.height;
+    final k = p.resolution / 1080;
+    final w = _even(p.aspect.width * k), h = _even(p.aspect.height * k);
     final args = <String>['-y'];
     final f = <String>[];
     var input = 0;
@@ -56,7 +57,7 @@ class ExportCommand {
       final c = p.clips[i];
       final dur = c.outputDuration.inMicroseconds / 1e6;
       final frames = (dur * fps).round().clamp(1, 1 << 30);
-      final speed = c.speed.clamp(0.5, 2.0).toStringAsFixed(3);
+      final hasMask = c.bgMask != null && !c.isImage && c.width > 0 && c.height > 0;
 
       final chain = StringBuffer();
       if (c.isImage) {
@@ -65,16 +66,29 @@ class ExportCommand {
       } else {
         args.addAll(['-i', c.path]);
         final vi = input++;
-        chain.write('[$vi:v]trim=start=${_n(c.trimStart)}:end=${_n(c.trimEnd)},'
-            'setpts=(PTS-STARTPTS)/$speed,fps=$fps');
+        f.addAll(_timed('$vi:v', c, 'tv$i', audio: false));
+        if (hasMask) {
+          args.addAll(['-i', c.bgMask!]);
+          final mi = input++;
+          f.addAll(_timed('$mi:v', c, 'tm$i', audio: false));
+          f.add('[tm$i]fps=$fps,format=gray,scale=${c.width}:${c.height}[tmg$i]');
+          chain.write('[tv$i]fps=$fps${c.stabilize ? ',deshake' : ''},'
+              'scale=${c.width}:${c.height},format=rgba[tvr$i];'
+              '[tvr$i][tmg$i]alphamerge');
+        } else {
+          chain.write('[tv$i]fps=$fps${c.stabilize ? ',deshake' : ''}');
+        }
         if (c.hasAudio) {
+          f.addAll(_timed('$vi:a', c, 'ta$i', audio: true));
           final fx = [
+            'volume=${c.volume.toStringAsFixed(2)}',
+            if (c.fadeIn > Duration.zero) 'afade=t=in:st=0:d=${_n(c.fadeIn)}',
+            if (c.fadeOut > Duration.zero)
+              'afade=t=out:st=${_n(c.outputDuration - c.fadeOut)}:d=${_n(c.fadeOut)}',
             if (c.denoise) 'afftdn=nf=-25',
             if (c.voiceFx.ffmpeg != null) c.voiceFx.ffmpeg!,
           ];
-          f.add('[$vi:a]atrim=start=${_n(c.trimStart)}:end=${_n(c.trimEnd)},asetpts=PTS-STARTPTS,'
-              'atempo=$speed,volume=${c.volume.toStringAsFixed(2)}'
-              '${fx.isEmpty ? '' : ',${fx.join(',')}'},$_audioFormat[a$i]');
+          f.add('[ta$i]${fx.join(',')},$_audioFormat[a$i]');
         }
       }
       if (c.isImage || !c.hasAudio) {
@@ -85,22 +99,30 @@ class ExportCommand {
 
       final turn = _transpose(c.quarterTurns);
       if (turn != null) chain.write(',$turn');
-      switch (p.background) {
-        case CanvasBackground.blur:
-          chain
-            ..write(',split[bs$i][fs$i];')
-            ..write('[bs$i]scale=$w:$h:force_original_aspect_ratio=increase,'
-                'crop=$w:$h,boxblur=30:3[bg$i];')
-            ..write('[fs$i]scale=$w:$h:force_original_aspect_ratio=decrease[fg$i];')
-            ..write('[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2');
-        case CanvasBackground.black:
-        case CanvasBackground.white:
-          final color = p.background == CanvasBackground.white ? 'white' : 'black';
-          chain.write(',scale=$w:$h:force_original_aspect_ratio=decrease,'
-              'pad=$w:$h:(ow-iw)/2:(oh-ih)/2:color=$color');
+      if (c.hasCrop) {
+        final z = c.cropZoom.toStringAsFixed(4);
+        chain.write(",crop=w='trunc(iw/$z/2)*2':h='trunc(ih/$z/2)*2'"
+            ":x='(iw-ow)*${(0.5 + c.cropX / 2).toStringAsFixed(4)}'"
+            ":y='(ih-oh)*${(0.5 + c.cropY / 2).toStringAsFixed(4)}'");
+      }
+      if (p.background == CanvasBackground.blur || hasMask) {
+        final bg = p.background == CanvasBackground.blur
+            ? 'boxblur=30:3'
+            : 'drawbox=c=${p.background == CanvasBackground.white ? 'white' : 'black'}:t=fill';
+        chain
+          ..write(',split[bs$i][fs$i];')
+          ..write('[bs$i]format=yuv420p,scale=$w:$h:force_original_aspect_ratio=increase,'
+              'crop=$w:$h,$bg[bg$i];')
+          ..write('[fs$i]scale=$w:$h:force_original_aspect_ratio=decrease[fg$i];')
+          ..write('[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2');
+      } else {
+        final color = p.background == CanvasBackground.white ? 'white' : 'black';
+        chain.write(',scale=$w:$h:force_original_aspect_ratio=decrease,'
+            'pad=$w:$h:(ow-iw)/2:(oh-ih)/2:color=$color');
       }
       chain.write(',setsar=1,format=yuv420p');
       if (c.filter.ffmpeg != null) chain.write(',${c.filter.ffmpeg}');
+      if (c.adjust.ffmpeg != null) chain.write(',${c.adjust.ffmpeg}');
       final fx = _effect(c.effect, w, h, frames, fps);
       if (fx != null) chain.write(',$fx');
       chain.write(',settb=AVTB[v$i]');
@@ -139,19 +161,36 @@ class ExportCommand {
       if (l.start >= total || l.duration <= Duration.zero) continue;
       final s = l.start.inMicroseconds / 1e6;
       final d = math.max(0.05, math.min(l.duration.inMicroseconds / 1e6, totalS - s));
-      final (pw, ph) = l.pixelSize(w);
+      final full = l.duration.inMicroseconds / 1e6;
+      final (mw, mh) = l.pixelSize(w, l.maxScale);
       if (l.isImage) {
         args.addAll(['-loop', '1', '-framerate', '$fps', '-t', d.toStringAsFixed(3), '-i', l.path]);
       } else {
         args.addAll(['-ss', _n(l.trimStart), '-t', d.toStringAsFixed(3), '-i', l.path]);
       }
       final li = input++;
-      final chain = StringBuffer('[$li:v]fps=$fps,setpts=PTS-STARTPTS,scale=$pw:$ph,setsar=1,format=rgba');
-      final mask = pipMasks[k];
-      if (mask != null) {
-        args.addAll(['-loop', '1', '-framerate', '$fps', '-t', d.toStringAsFixed(3), '-i', mask]);
-        final mi = input++;
-        chain.write('[pv$k];[$mi:v]format=gray,scale=$pw:$ph[pm$k];[pv$k][pm$k]alphamerge');
+      final chain = StringBuffer('[$li:v]fps=$fps,setpts=PTS-STARTPTS,scale=$mw:$mh,setsar=1,format=rgba');
+
+      // Maschere: forma (PNG) e/o persona (video), moltiplicate tra loro.
+      final masks = <String>[];
+      final shape = pipMasks[k];
+      if (shape != null) {
+        args.addAll(['-loop', '1', '-framerate', '$fps', '-t', d.toStringAsFixed(3), '-i', shape]);
+        f.add('[${input++}:v]format=gray,scale=$mw:$mh,setsar=1[pms$k]');
+        masks.add('pms$k');
+      }
+      if (l.bgMask != null && !l.isImage) {
+        args.addAll(['-ss', _n(l.trimStart), '-t', d.toStringAsFixed(3), '-i', l.bgMask!]);
+        f.add('[${input++}:v]fps=$fps,setpts=PTS-STARTPTS,format=gray,scale=$mw:$mh,setsar=1[pmb$k]');
+        masks.add('pmb$k');
+      }
+      if (masks.isNotEmpty) {
+        var m = masks.first;
+        if (masks.length == 2) {
+          f.add('[${masks[0]}][${masks[1]}]blend=all_mode=multiply[pmm$k]');
+          m = 'pmm$k';
+        }
+        chain.write('[pv$k];[pv$k][$m]alphamerge');
       }
       // Il chroma key va dopo la maschera: alphamerge sovrascrive l'alfa.
       if (l.chroma != null) {
@@ -159,11 +198,31 @@ class ExportCommand {
         chain.write(',colorkey=0x$rgb:${l.chromaSimilarity.toStringAsFixed(3)}:0.08');
       }
       if (l.opacity < 0.999) chain.write(',colorchannelmixer=aa=${l.opacity.toStringAsFixed(3)}');
+
+      final prog = 'clip(t/${full.toStringAsFixed(3)},0,1)';
+      if (l.toScale != null && (l.toScale! - l.scale).abs() > 1e-4) {
+        final (w0, h0) = l.pixelSize(w, l.scale);
+        final (w1, h1) = l.pixelSize(w, l.toScale);
+        chain.write(",scale=w='max(2,trunc(($w0+(${w1 - w0})*$prog)/2)*2)'"
+            ":h='max(2,trunc(($h0+(${h1 - h0})*$prog)/2)*2)':eval=frame");
+      }
+      final rotA = l.rotation, rotB = l.toRotation ?? l.rotation;
+      if (rotA.abs() > 1e-4 || rotB.abs() > 1e-4) {
+        final dd = _even(math.sqrt(mw * mw + mh * mh) + 2);
+        chain.write(",rotate=a='${_d(rotA)}+(${_d(rotB - rotA)})*$prog':ow=$dd:oh=$dd:c=none");
+      }
       chain.write(',setpts=PTS+${s.toStringAsFixed(3)}/TB[p$k]');
       f.add(chain.toString());
 
-      final prog = 'clip((t-${s.toStringAsFixed(3)})/${d.toStringAsFixed(3)},0,1)';
-      final x = _lerp(l.cx, l.toCx, prog), y = _lerp(l.cy, l.toCy, prog);
+      final String x, y;
+      if (l.track != null && l.track!.length >= 6) {
+        x = _pathExpr(l.track!, l.cx, 1, s);
+        y = _pathExpr(l.track!, l.cy, 2, s);
+      } else {
+        final ap = 'clip((t-${s.toStringAsFixed(3)})/${full.toStringAsFixed(3)},0,1)';
+        x = _lerp(l.cx, l.toCx, ap);
+        y = _lerp(l.cy, l.toCy, ap);
+      }
       final next = 'vp$k';
       f.add("[$vCur][p$k]overlay=x='($x)*W-w/2':y='($y)*H-h/2':eval=frame:eof_action=pass:"
           "enable='between(t,${s.toStringAsFixed(3)},${(s + d).toStringAsFixed(3)})'[$next]");
@@ -196,13 +255,27 @@ class ExportCommand {
         ov.write(",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
             "a='alpha(X,Y)*clip($alpha,0,1)'");
       }
+      final origEnd = o.end.inMicroseconds / 1e6;
+      final len = (origEnd - s).clamp(0.001, 1e9).toStringAsFixed(3);
+      final local = 'clip(t/$len,0,1)';
+      final ks = o.toScale ?? 1;
+      if ((ks - 1).abs() > 1e-4) {
+        ov.write(",scale=w='max(2,trunc(${r.width}*(1+(${_d(ks - 1)})*$local)/2)*2)'"
+            ":h='max(2,trunc(${r.height}*(1+(${_d(ks - 1)})*$local)/2)*2)':eval=frame");
+      }
+      if (o.toRotation != null && (o.toRotation! - o.rotation).abs() > 1e-4) {
+        final m = math.max(1.0, ks);
+        final dd = _even(math.sqrt(r.width * r.width + r.height * r.height) * m + 2);
+        ov.write(",rotate=a='(${_d(o.toRotation! - o.rotation)})*$local':ow=$dd:oh=$dd:c=none");
+      }
       ov.write(',setpts=PTS+${s.toStringAsFixed(3)}/TB[o$k]');
       f.add(ov.toString());
 
-      final origEnd = o.end.inMicroseconds / 1e6;
-      final prog = 'clip((t-${s.toStringAsFixed(3)})/${(origEnd - s).clamp(0.001, 1e9).toStringAsFixed(3)},0,1)';
-      final bx = _lerp(o.cx, o.toCx, prog), by = _lerp(o.cy, o.toCy, prog);
-      final (dx, dy) = offsetExpr(o, 't', s, e);
+      final prog = 'clip((t-${s.toStringAsFixed(3)})/$len,0,1)';
+      final tracked = o.track != null && o.track!.length >= 6;
+      final bx = tracked ? _pathExpr(o.track!, o.cx, 1, s) : _lerp(o.cx, o.toCx, prog);
+      final by = tracked ? _pathExpr(o.track!, o.cy, 2, s) : _lerp(o.cy, o.toCy, prog);
+      final (dx, dy) = tracked ? ('0', '0') : offsetExpr(o, 't', s, e);
       final next = 'vo$k';
       f.add("[$vCur][o$k]overlay="
           "x='($bx)*W-w/2${dx == '0' ? '' : '+($dx)*W'}':"
@@ -238,8 +311,15 @@ class ExportCommand {
         if (a.denoise) 'afftdn=nf=-25',
         if (a.fx.ffmpeg != null) a.fx.ffmpeg!,
       ];
-      f.add('[$ai:a]atrim=duration=${_n(a.duration)},asetpts=PTS-STARTPTS'
-          '${fx.isEmpty ? '' : ',${fx.join(',')}'},'
+      final room = total - a.start;
+      final len = a.duration < room ? a.duration : room;
+      final fades = [
+        if (a.fadeIn > Duration.zero) 'afade=t=in:st=0:d=${_n(a.fadeIn)}',
+        if (a.fadeOut > Duration.zero && a.fadeOut < len)
+          'afade=t=out:st=${_n(len - a.fadeOut)}:d=${_n(a.fadeOut)}',
+      ];
+      f.add('[$ai:a]atrim=start=${_n(a.sourceStart)}:duration=${_n(len)},asetpts=PTS-STARTPTS'
+          '${fx.isEmpty ? '' : ',${fx.join(',')}'}${fades.isEmpty ? '' : ',${fades.join(',')}'},'
           'volume=${a.volume.toStringAsFixed(2)},$_audioFormat,adelay=$ms|$ms[au$k]');
       extraAudio.add('au$k');
     }
@@ -266,6 +346,61 @@ class ExportCommand {
     ]);
     return args;
   }
+
+  /// Taglio + velocità (anche a curva) di una clip, per video, maschera o audio.
+  static List<String> _timed(String src, VideoClip c, String out, {required bool audio}) {
+    final segs = c.segments;
+    final a = audio ? 'a' : '';
+    String tempo(double v) {
+      if (!audio) return 'setpts=(PTS-STARTPTS)/${v.toStringAsFixed(4)}';
+      if (v >= 0.5) return 'asetpts=PTS-STARTPTS,atempo=${v.toStringAsFixed(4)}';
+      final r = math.sqrt(v).toStringAsFixed(4);
+      return 'asetpts=PTS-STARTPTS,atempo=$r,atempo=$r';
+    }
+
+    if (segs.length == 1) {
+      final (st, en, v) = segs.first;
+      return ['[$src]${a}trim=start=${_n(st)}:end=${_n(en)},${tempo(v)}[$out]'];
+    }
+    final n = segs.length;
+    final parts = <String>[
+      '[$src]${audio ? 'asplit' : 'split'}=$n${[for (var k = 0; k < n; k++) '[${out}_s$k]'].join()}',
+    ];
+    for (var k = 0; k < n; k++) {
+      final (st, en, v) = segs[k];
+      parts.add('[${out}_s$k]${a}trim=start=${_n(st)}:end=${_n(en)},${tempo(v)}[${out}_t$k]');
+    }
+    parts.add('${[for (var k = 0; k < n; k++) '[${out}_t$k]'].join()}'
+        'concat=n=$n:v=${audio ? 0 : 1}:a=${audio ? 1 : 0}[$out]');
+    return parts;
+  }
+
+  /// Percorso del tracciamento come espressione (somma di tratti lineari).
+  /// [axis] 1 = x, 2 = y. Il percorso viene campionato al massimo 5 volte al secondo.
+  static String _pathExpr(List<double> track, double base, int axis, double start) {
+    final n = track.length ~/ 3;
+    final pts = <(double, double)>[];
+    var lastT = -1.0;
+    for (var i = 0; i < n; i++) {
+      final t = track[i * 3];
+      if (i == 0 || i == n - 1 || t - lastT >= 0.2) {
+        pts.add((t, track[i * 3 + axis]));
+        lastT = t;
+      }
+    }
+    final v0 = pts.first.$2;
+    final terms = <String>[];
+    for (var i = 0; i + 1 < pts.length; i++) {
+      final (ta, va) = pts[i], (tb, vb) = pts[i + 1];
+      final a = (start + ta).toStringAsFixed(3), b = (start + tb).toStringAsFixed(3);
+      final span = math.max(1e-3, tb - ta).toStringAsFixed(3);
+      terms.add('gte(t,$a)*lt(t,$b)*(${_d(va - v0)}+(${_d(vb - va)})*(t-$a)/$span)');
+    }
+    terms.add('gte(t,${(start + pts.last.$1).toStringAsFixed(3)})*${_d(pts.last.$2 - v0)}');
+    return '${_d(base)}+${terms.join('+')}';
+  }
+
+  static int _even(num v) => math.max(2, (v / 2).round() * 2);
 
   static String? _transpose(int quarterTurns) {
     switch (quarterTurns % 4) {

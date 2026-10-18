@@ -30,6 +30,17 @@ Flutter e usa FFmpeg per l'esportazione.
 - **7 modelli pronti**: Vlog, Sport, Cinematico, Ricordi, Retrò VHS, Social/Reel, Bianco e nero.
 - Gli aggiornamenti si installano sopra la versione precedente, grazie alla chiave di firma fissa.
 
+### Novità v0.4
+
+- **Rimozione dello sfondo con l'IA**: ML Kit trova le persone fotogramma per fotogramma, direttamente sul telefono. Funziona sulle clip e sulle sovrapposizioni.
+- **Tracciamento del movimento**: testi, sticker e sovrapposizioni seguono un oggetto nel video.
+- **Curve di velocità**: Montaggio, Eroe, Proiettile, Salto, Lampo, Accelera, Rallenta. L'audio segue la curva.
+- **Keyframe di zoom e rotazione**, oltre alla posizione: con due dita sull'anteprima.
+- **Regola**: luminosità, contrasto, saturazione, temperatura e nitidezza, da applicare anche a tutte le clip.
+- **Ritaglia** (ingrandimento e inquadratura), **Stabilizza**, **Fermo immagine**.
+- **Estrai audio** dalla clip e **dissolvenze audio** in entrata e in uscita.
+- **Esportazione** a 720p, 1080p, 2K o 4K, con 24, 25, 30 o 60 fps.
+
 ## Avvio rapido
 
 Ti servono Flutter 3.27 o più recente, Android Studio e/o Xcode (per iOS
@@ -73,7 +84,9 @@ evita i problemi di escape) e `amix` con la musica.
 - Nell'anteprima le transizioni sono un taglio netto e alcuni effetti (glitch, VHS) sono approssimati. Nel video esportato escono completi.
 - La prima volta i sottotitoli devono scaricare il modello: circa 100–160 MB.
 - Nell'anteprima il chroma key e gli effetti voce non si vedono e non si sentono: sono applicati al video esportato.
-- Mancano ancora: keyframe di zoom e rotazione, curve di velocità, tracciamento del movimento, rimozione dello sfondo con l'IA.
+- La rimozione dello sfondo riconosce le persone, non gli oggetti, e si vede solo nel video esportato. Vale lo stesso per la stabilizzazione.
+- Il tracciamento segue bene oggetti con contrasto e movimento regolare. Con movimenti molto veloci o oggetti che spariscono può perdersi.
+- Mancano ancora rispetto a CapCut: sincronizzazione automatica col ritmo della musica, sintesi vocale (testo in voce), effetti IA di stile e la libreria online di modelli, musica ed effetti.
 
 ## Licenza
 

@@ -134,14 +134,22 @@ class OverlaysPainter extends CustomPainter {
     final t = time.inMicroseconds / 1e6;
     for (final o in overlays) {
       if (!o.visibleAt(time)) continue;
+      final tracked = o.track != null;
       final a = o.animAt(t);
       final layout = OverlayLayout(o, scale: scale, frameWidth: frameWidth);
       final base = o.centerAt(time);
       final center = Offset(
-        (base.dx + a.dx) * size.width,
-        (base.dy + a.dy) * size.height,
+        (base.dx + (tracked ? 0 : a.dx)) * size.width,
+        (base.dy + (tracked ? 0 : a.dy)) * size.height,
       );
+      final k = o.scaleAt(time), rot = o.extraRotationAt(time);
+      canvas.save();
+      canvas.translate(center.dx, center.dy);
+      canvas.rotate(rot);
+      canvas.scale(k);
+      canvas.translate(-center.dx, -center.dy);
       layout.paint(canvas, center, opacity: a.opacity);
+      canvas.restore();
       if (identical(o, selected)) {
         final r = Rect.fromCenter(
             center: center,

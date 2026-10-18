@@ -1,7 +1,7 @@
 name: clipforge
 description: Editor video open source in stile CapCut, scritto in Flutter con FFmpeg.
 publish_to: "none"
-version: 0.3.0+3
+version: 0.4.0+4
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -21,6 +21,8 @@ dependencies:
   sherpa_onnx: ^1.13.8
   # Registrazione della voce fuori campo
   record: ^7.1.2
+  # Rimozione dello sfondo (segmentazione delle persone, sul telefono)
+  google_mlkit_selfie_segmentation: ^0.12.1
 
 dev_dependencies:
   flutter_test:

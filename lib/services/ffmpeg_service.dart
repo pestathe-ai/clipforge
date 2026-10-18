@@ -143,6 +143,55 @@ class FFmpegService {
     return ok ? outPath : null;
   }
 
+  /// Fotogramma della clip all'istante locale [local], salvato come JPG.
+  Future<String?> frameAt(VideoClip c, Duration local, String outPath) async {
+    final ok = await _run([
+      '-y', '-ss', _s(c.sourceAt(local)), '-i', c.path,
+      '-frames:v', '1', '-q:v', '2', outPath,
+    ]);
+    return ok && File(outPath).existsSync() ? outPath : null;
+  }
+
+  /// Estrae fotogrammi JPG da [path] (da [start] per [duration]) a [fps]
+  /// fotogrammi al secondo, larghi [width] pixel, nella cartella [dir].
+  Future<List<String>> extractFrames(String path, Duration start, Duration duration,
+      {required double fps, required int width, required String dir, String extraVf = ''}) async {
+    await Directory(dir).create(recursive: true);
+    await _run([
+      '-y', '-ss', _s(start), '-t', _s(duration), '-i', path,
+      '-vf', '${extraVf.isEmpty ? '' : '$extraVf,'}fps=${fps.toStringAsFixed(4)},scale=$width:-2',
+      '-q:v', '4', p.join(dir, 'f_%05d.jpg'),
+    ]);
+    final files = (await Directory(dir).list().toList())
+        .whereType<File>()
+        .map((f) => f.path)
+        .where((f) => f.endsWith('.jpg'))
+        .toList()
+      ..sort();
+    return files;
+  }
+
+  /// Codifica una sequenza di maschere grezze (gray8) in un video.
+  Future<bool> encodeMask(String rawPath, int w, int h, double fps, String outPath) =>
+      _run([
+        '-y', '-f', 'rawvideo', '-pix_fmt', 'gray', '-s', '${w}x$h',
+        '-r', fps.toStringAsFixed(4), '-i', rawPath,
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '16', '-pix_fmt', 'yuv420p',
+        outPath,
+      ]);
+
+  /// Fotogrammi in scala di grigi grezzi (per il tracciamento).
+  Future<String?> grayFrames(String path, Duration start, Duration duration,
+      {required double fps, required int width, required int height, required String outPath,
+      String extraVf = ''}) async {
+    final ok = await _run([
+      '-y', '-ss', _s(start), '-t', _s(duration), '-i', path,
+      '-vf', '${extraVf.isEmpty ? '' : '$extraVf,'}fps=${fps.toStringAsFixed(4)},scale=$width:$height,format=gray',
+      '-f', 'rawvideo', '-pix_fmt', 'gray', outPath,
+    ]);
+    return ok ? outPath : null;
+  }
+
   /// Esporta il progetto in MP4. [onProgress] riceve un valore 0–1.
   Future<String> export(
     Project project, {
@@ -160,7 +209,7 @@ class FFmpegService {
       final o = project.overlays[i];
       if (o.text.trim().isEmpty) continue;
       final path = p.join(work.path, 'ov_$i.png');
-      final (w, h) = await OverlayLayout(o, scale: 1, frameWidth: project.aspect.width)
+      final (w, h) = await OverlayLayout(o, scale: project.resolution / 1080, frameWidth: project.aspect.width)
           .writePng(path);
       rendered.add(RenderedOverlay(o, path, w, h));
     }
@@ -170,7 +219,8 @@ class FFmpegService {
     for (var i = 0; i < project.pips.length; i++) {
       final l = project.pips[i];
       if (l.mask == MaskShape.none) continue;
-      final (w, h) = l.pixelSize(project.aspect.width);
+      final exportW = ((project.aspect.width * project.resolution / 1080) / 2).round() * 2;
+      final (w, h) = l.pixelSize(exportW, l.maxScale);
       final path = p.join(work.path, 'mask_$i.png');
       await writeMaskPng(l.mask, w, h, path);
       masks[i] = path;

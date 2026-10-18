@@ -20,7 +20,7 @@ if ! grep -q RECORD_AUDIO "$MANIFEST"; then
   rm -f "$MANIFEST.bak"
 fi
 
-# iOS: target minimo 14.0 e descrizioni dei permessi foto.
+# iOS: target minimo 15.6 (ML Kit) e descrizioni dei permessi foto.
 PLIST=ios/Runner/Info.plist
 add_key() {
   /usr/libexec/PlistBuddy -c "Add :$1 string $2" "$PLIST" 2>/dev/null \
@@ -30,7 +30,7 @@ if [ -x /usr/libexec/PlistBuddy ]; then
   add_key NSPhotoLibraryUsageDescription "ClipForge usa i tuoi video per montarli."
   add_key NSPhotoLibraryAddUsageDescription "ClipForge salva i video esportati nella galleria."
   add_key NSMicrophoneUsageDescription "ClipForge registra la voce fuori campo."
-  sed -i '' -E "s/# platform :ios, '[0-9.]+'/platform :ios, '14.0'/" ios/Podfile 2>/dev/null || true
+  sed -i '' -E "s/# platform :ios, '[0-9.]+'/platform :ios, '15.6'/" ios/Podfile 2>/dev/null || true
 else
   echo "Non sei su macOS: aggiungi a mano a $PLIST le chiavi"
   echo "NSPhotoLibraryUsageDescription e NSPhotoLibraryAddUsageDescription."

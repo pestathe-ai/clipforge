@@ -99,6 +99,31 @@ void main() {
     expect(graph, contains('adelay=0|0'));
   });
 
+  test('curve di velocità: durata e conversioni coerenti', () {
+    final c = VideoClip(
+      path: '/x.mp4',
+      sourceDuration: const Duration(seconds: 10),
+      hasAudio: true,
+      trimStart: const Duration(seconds: 1),
+      trimEnd: const Duration(seconds: 6),
+      speedCurve: SpeedCurve.jump, // 0.5, 3, 0.5 su tratti di 5/3 s
+    );
+    const third = 5 / 3;
+    final expected = third / 0.5 + third / 3 + third / 0.5;
+    expect(c.outputDuration.inMicroseconds / 1e6, closeTo(expected, 1e-3));
+    for (final ms in [0, 500, 2000, 4000, 6000, 7000]) {
+      final local = Duration(milliseconds: ms);
+      final back = c.localAt(c.sourceAt(local));
+      expect((back - local).inMicroseconds.abs(), lessThan(2000));
+    }
+    expect(c.speedAt(Duration.zero), 0.5);
+    final graph = (ExportCommand(project: Project()..clips.add(c), outputPath: '/o.mp4').build());
+    final g = graph[graph.indexOf('-filter_complex') + 1];
+    expect(g, contains('split=3'));
+    expect(g, contains('asplit=3'));
+    expect(g, contains('atempo=0.7071,atempo=0.7071'));
+  });
+
   test('progetto vuoto lancia un errore', () {
     expect(() => ExportCommand(project: Project(), outputPath: '/o.mp4').build(), throwsStateError);
   });
@@ -109,7 +134,10 @@ void main() {
     final dir = Platform.environment['CLIPFORGE_MEDIA'];
     if (dir == null) return;
     for (final bg in CanvasBackground.values) {
-      final p = Project()..background = bg;
+      final p = Project()
+        ..background = bg
+        ..resolution = bg == CanvasBackground.blur ? 720 : 1080
+        ..fps = bg == CanvasBackground.white ? 24 : 30;
       final effects = ClipEffect.values;
       final transitions = TransitionType.values;
       final n = transitions.length;
@@ -133,6 +161,17 @@ void main() {
           transition: transitions[i],
           transitionDuration: const Duration(milliseconds: 400),
           quarterTurns: i % 4,
+          width: withAudio ? 1280 : 720,
+          height: withAudio ? 720 : 1280,
+          speedCurve: SpeedCurve.values[i % SpeedCurve.values.length],
+          adjust: i % 3 == 1 ? const ColorAdjust(brightness: 0.1, contrast: 1.2, saturation: 1.3, warmth: 0.5, sharpen: 0.5) : const ColorAdjust(),
+          stabilize: i == 5,
+          cropZoom: i % 4 == 2 ? 1.5 : 1.0,
+          cropX: 0.3,
+          cropY: -0.2,
+          fadeIn: withAudio ? const Duration(milliseconds: 300) : Duration.zero,
+          fadeOut: withAudio ? const Duration(milliseconds: 300) : Duration.zero,
+          bgMask: withAudio && i % 4 == 0 ? '$dir/maskvid.mp4' : null,
           denoise: i == 2,
           voiceFx: withAudio ? AudioFx.values[i % AudioFx.values.length] : AudioFx.none,
         ));
@@ -150,6 +189,10 @@ void main() {
           trimStart: const Duration(milliseconds: 500),
           trimEnd: const Duration(milliseconds: 3500),
           mask: MaskShape.circle,
+          bgMask: '$dir/maskvid.mp4',
+          toScale: 0.7,
+          rotation: 0.2,
+          toRotation: -0.4,
           chroma: const Color(0xFF00FF00),
           opacity: 0.8,
           toCx: 0.8,
@@ -165,11 +208,15 @@ void main() {
           start: const Duration(seconds: 5),
           trimEnd: const Duration(seconds: 2),
           scale: 0.3,
+          track: [0, 0.3, 0.3, 0.5, 0.35, 0.32, 1.0, 0.45, 0.4, 1.5, 0.5, 0.42],
         ),
       ]);
       p.audios.addAll([
         AudioItem(path: '$dir/voice.m4a', start: const Duration(milliseconds: 1500),
             duration: const Duration(seconds: 2), fx: AudioFx.echo, denoise: true),
+        AudioItem(path: '$dir/a.mp4', start: const Duration(seconds: 3), duration: const Duration(seconds: 2),
+            sourceStart: const Duration(seconds: 1), fadeIn: const Duration(milliseconds: 500),
+            fadeOut: const Duration(milliseconds: 500)),
         AudioItem(path: '$dir/voice.m4a', start: const Duration(seconds: 6),
             duration: const Duration(seconds: 2), isVoice: false, fx: AudioFx.chipmunk),
       ]);
@@ -185,6 +232,9 @@ void main() {
           animIn: ai,
           animOut: AnimOut.values[k % AnimOut.values.length],
           cx: 0.3 + 0.1 * (k % 4),
+          toScale: k == 1 ? 1.8 : null,
+          toRotation: k == 2 ? 1.0 : null,
+          track: k == 3 ? [0, 0.4, 0.4, 0.5, 0.45, 0.5, 1.0, 0.5, 0.55] : null,
         );
         p.overlays.add(o);
         overlays.add(RenderedOverlay(o, '$dir/ov.png', 300, 100));

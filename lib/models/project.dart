@@ -139,6 +139,17 @@ class VideoClip {
     this.voiceFx = AudioFx.none,
     this.reversed = false,
     this.originalPath,
+    this.width = 0,
+    this.height = 0,
+    this.speedCurve = SpeedCurve.none,
+    this.adjust = const ColorAdjust(),
+    this.stabilize = false,
+    this.cropZoom = 1.0,
+    this.cropX = 0.0,
+    this.cropY = 0.0,
+    this.fadeIn = Duration.zero,
+    this.fadeOut = Duration.zero,
+    this.bgMask,
   })  : trimStart = trimStart ?? Duration.zero,
         trimEnd = trimEnd ?? sourceDuration;
 
@@ -188,15 +199,91 @@ class VideoClip {
   bool reversed;
   String? originalPath;
 
+  /// Dimensioni del file sorgente (già ruotate secondo i metadati), 0 se ignote.
+  int width;
+  int height;
+
+  SpeedCurve speedCurve;
+  ColorAdjust adjust;
+  bool stabilize;
+
+  /// Ritaglio: ingrandimento (1–3) e spostamento (-1…1) dentro l'inquadratura.
+  double cropZoom;
+  double cropX;
+  double cropY;
+
+  /// Dissolvenze dell'audio della clip.
+  Duration fadeIn;
+  Duration fadeOut;
+
+  /// Video maschera (bianco = persona) per la rimozione dello sfondo, o null.
+  String? bgMask;
+
+  bool get hasCrop => cropZoom > 1.001;
+
+  /// Tratti a velocità costante: (inizio sorgente, fine sorgente, velocità).
+  List<(Duration, Duration, double)> get segments {
+    final base = speed.clamp(0.25, 4.0);
+    final curve = speedCurve.points;
+    if (isImage || curve == null) return [(trimStart, trimEnd, base)];
+    final len = (trimEnd - trimStart).inMicroseconds;
+    final n = curve.length;
+    return [
+      for (var k = 0; k < n; k++)
+        (
+          trimStart + Duration(microseconds: len * k ~/ n),
+          trimStart + Duration(microseconds: len * (k + 1) ~/ n),
+          (curve[k] * base).clamp(0.25, 4.0),
+        ),
+    ];
+  }
+
   /// Durata della clip nel video finale, dopo taglio e velocità.
-  Duration get outputDuration => Duration(
-        microseconds: ((trimEnd - trimStart).inMicroseconds / speed).round(),
-      );
+  Duration get outputDuration {
+    var us = 0.0;
+    for (final (s, e, v) in segments) {
+      us += (e - s).inMicroseconds / v;
+    }
+    return Duration(microseconds: us.round());
+  }
 
   /// Converte un istante locale (0 = inizio clip nel video finale)
   /// nella posizione corrispondente del file sorgente.
-  Duration sourceAt(Duration local) =>
-      trimStart + Duration(microseconds: (local.inMicroseconds * speed).round());
+  Duration sourceAt(Duration local) {
+    var rest = local.inMicroseconds.toDouble();
+    final segs = segments;
+    for (final (s, e, v) in segs) {
+      final out = (e - s).inMicroseconds / v;
+      if (rest <= out) return s + Duration(microseconds: (rest * v).round());
+      rest -= out;
+    }
+    return segs.last.$2;
+  }
+
+  /// Inverso di [sourceAt].
+  Duration localAt(Duration source) {
+    var acc = 0.0;
+    for (final (s, e, v) in segments) {
+      if (source <= e) {
+        final into = (source - s).inMicroseconds.clamp(0, (e - s).inMicroseconds);
+        return Duration(microseconds: (acc + into / v).round());
+      }
+      acc += (e - s).inMicroseconds / v;
+    }
+    return Duration(microseconds: acc.round());
+  }
+
+  /// Velocità effettiva all'istante locale [local].
+  double speedAt(Duration local) {
+    var rest = local.inMicroseconds.toDouble();
+    final segs = segments;
+    for (final (s, e, v) in segs) {
+      final out = (e - s).inMicroseconds / v;
+      if (rest < out) return v;
+      rest -= out;
+    }
+    return segs.last.$3;
+  }
 
   VideoClip copy() => VideoClip.fromJson(toJson());
 
@@ -218,6 +305,17 @@ class VideoClip {
         'voiceFx': voiceFx.name,
         'reversed': reversed,
         'originalPath': originalPath,
+        'width': width,
+        'height': height,
+        'speedCurve': speedCurve.name,
+        'adjust': adjust.toJson(),
+        'stabilize': stabilize,
+        'cropZoom': cropZoom,
+        'cropX': cropX,
+        'cropY': cropY,
+        'fadeIn': fadeIn.inMicroseconds,
+        'fadeOut': fadeOut.inMicroseconds,
+        'bgMask': bgMask,
       };
 
   factory VideoClip.fromJson(Map<String, dynamic> j) => VideoClip(
@@ -240,7 +338,149 @@ class VideoClip {
         voiceFx: _enum(AudioFx.values, j['voiceFx'], AudioFx.none),
         reversed: (j['reversed'] as bool?) ?? false,
         originalPath: j['originalPath'] as String?,
+        width: (j['width'] as int?) ?? 0,
+        height: (j['height'] as int?) ?? 0,
+        speedCurve: _enum(SpeedCurve.values, j['speedCurve'], SpeedCurve.none),
+        adjust: j['adjust'] == null
+            ? const ColorAdjust()
+            : ColorAdjust.fromJson(j['adjust'] as Map<String, dynamic>),
+        stabilize: (j['stabilize'] as bool?) ?? false,
+        cropZoom: (j['cropZoom'] as num?)?.toDouble() ?? 1.0,
+        cropX: (j['cropX'] as num?)?.toDouble() ?? 0.0,
+        cropY: (j['cropY'] as num?)?.toDouble() ?? 0.0,
+        fadeIn: Duration(microseconds: (j['fadeIn'] as int?) ?? 0),
+        fadeOut: Duration(microseconds: (j['fadeOut'] as int?) ?? 0),
+        bgMask: j['bgMask'] as String?,
       );
+}
+
+// ─────────────────────────── Curve di velocità ───────────────────────────
+
+/// Curve di velocità in stile CapCut: la clip è divisa in tratti uguali
+/// (del file sorgente), ciascuno con il proprio moltiplicatore.
+enum SpeedCurve {
+  none('Nessuna', null),
+  montage('Montaggio', [1.0, 2.5, 0.5, 2.5, 1.0]),
+  hero('Eroe', [2.0, 2.0, 0.3, 0.3, 2.0, 2.0]),
+  bullet('Proiettile', [1.5, 0.3, 0.3, 0.3, 1.5]),
+  jump('Salto', [0.5, 3.0, 0.5]),
+  flash('Lampo', [3.0, 3.0, 0.4, 3.0, 3.0]),
+  speedUp('Accelera', [0.5, 0.8, 1.2, 1.8, 2.5]),
+  slowDown('Rallenta', [2.5, 1.8, 1.2, 0.8, 0.5]);
+
+  const SpeedCurve(this.label, this.points);
+  final String label;
+  final List<double>? points;
+}
+
+// ─────────────────────────── Regolazioni colore ───────────────────────────
+
+class ColorAdjust {
+  const ColorAdjust({
+    this.brightness = 0,
+    this.contrast = 1,
+    this.saturation = 1,
+    this.warmth = 0,
+    this.sharpen = 0,
+  });
+
+  /// -0.3…0.3
+  final double brightness;
+
+  /// 0.5…1.5
+  final double contrast;
+
+  /// 0…2
+  final double saturation;
+
+  /// -1 (freddo) … 1 (caldo)
+  final double warmth;
+
+  /// 0…1
+  final double sharpen;
+
+  bool get isNeutral =>
+      brightness.abs() < 0.005 &&
+      (contrast - 1).abs() < 0.005 &&
+      (saturation - 1).abs() < 0.005 &&
+      warmth.abs() < 0.005 &&
+      sharpen < 0.005;
+
+  ColorAdjust copyWith({double? brightness, double? contrast, double? saturation, double? warmth, double? sharpen}) =>
+      ColorAdjust(
+        brightness: brightness ?? this.brightness,
+        contrast: contrast ?? this.contrast,
+        saturation: saturation ?? this.saturation,
+        warmth: warmth ?? this.warmth,
+        sharpen: sharpen ?? this.sharpen,
+      );
+
+  /// Filtro FFmpeg equivalente, o null se neutro.
+  String? get ffmpeg {
+    if (isNeutral) return null;
+    final parts = <String>[
+      'eq=brightness=${brightness.toStringAsFixed(3)}:contrast=${contrast.toStringAsFixed(3)}'
+          ':saturation=${saturation.toStringAsFixed(3)}',
+      if (warmth.abs() >= 0.005)
+        'colorbalance=rm=${(warmth * 0.15).toStringAsFixed(3)}:bm=${(-warmth * 0.15).toStringAsFixed(3)}',
+      if (sharpen >= 0.005) 'unsharp=5:5:${(sharpen * 1.5).toStringAsFixed(3)}',
+    ];
+    return parts.join(',');
+  }
+
+  /// Matrice colore per l'anteprima (approssimata).
+  List<double> get matrix {
+    final s = saturation, c = contrast, b = brightness * 255;
+    final r = 0.2126 * (1 - s), g = 0.7152 * (1 - s), bl = 0.0722 * (1 - s);
+    final off = (1 - c) * 128 + b;
+    final wr = 1 + warmth * 0.12, wb = 1 - warmth * 0.12;
+    return [
+      (r + s) * c * wr, g * c * wr, bl * c * wr, 0, off, //
+      r * c, (g + s) * c, bl * c, 0, off,
+      r * c * wb, g * c * wb, (bl + s) * c * wb, 0, off,
+      0, 0, 0, 1, 0,
+    ];
+  }
+
+  Map<String, dynamic> toJson() => {
+        'brightness': brightness,
+        'contrast': contrast,
+        'saturation': saturation,
+        'warmth': warmth,
+        'sharpen': sharpen,
+      };
+
+  factory ColorAdjust.fromJson(Map<String, dynamic> j) => ColorAdjust(
+        brightness: (j['brightness'] as num).toDouble(),
+        contrast: (j['contrast'] as num).toDouble(),
+        saturation: (j['saturation'] as num).toDouble(),
+        warmth: (j['warmth'] as num).toDouble(),
+        sharpen: (j['sharpen'] as num).toDouble(),
+      );
+}
+
+// ─────────────────────────── Tracciamento ───────────────────────────
+
+/// Spostamento dovuto al tracciamento all'istante [tRel] (secondi
+/// dall'inizio dell'elemento), rispetto al primo punto del percorso.
+/// [track] è una lista piatta di terne (t, x, y).
+Offset? trackDelta(List<double>? track, double tRel) {
+  if (track == null || track.length < 6) return null;
+  final x0 = track[1], y0 = track[2];
+  final n = track.length ~/ 3;
+  if (tRel <= track[0]) return Offset.zero;
+  for (var i = 1; i < n; i++) {
+    final t1 = track[i * 3];
+    if (tRel <= t1) {
+      final t0 = track[(i - 1) * 3];
+      final k = t1 - t0 <= 0 ? 1.0 : (tRel - t0) / (t1 - t0);
+      final x = track[(i - 1) * 3 + 1] + (track[i * 3 + 1] - track[(i - 1) * 3 + 1]) * k;
+      final y = track[(i - 1) * 3 + 2] + (track[i * 3 + 2] - track[(i - 1) * 3 + 2]) * k;
+      return Offset(x - x0, y - y0);
+    }
+  }
+  return Offset(track[(n - 1) * 3 + 1] - x0, track[(n - 1) * 3 + 2] - y0);
+}
 }
 
 // ─────────────────────────── Effetti audio ───────────────────────────
@@ -269,11 +509,19 @@ class AudioItem {
     this.fx = AudioFx.none,
     this.isVoice = true,
     this.denoise = false,
+    this.sourceStart = Duration.zero,
+    this.fadeIn = Duration.zero,
+    this.fadeOut = Duration.zero,
   });
 
   final String path;
   Duration start;
   final Duration duration;
+
+  /// Da che punto del file partire (per l'audio estratto da una clip).
+  final Duration sourceStart;
+  Duration fadeIn;
+  Duration fadeOut;
   double volume;
   AudioFx fx;
   bool isVoice;
@@ -289,6 +537,9 @@ class AudioItem {
         'fx': fx.name,
         'isVoice': isVoice,
         'denoise': denoise,
+        'sourceStart': sourceStart.inMicroseconds,
+        'fadeIn': fadeIn.inMicroseconds,
+        'fadeOut': fadeOut.inMicroseconds,
       };
 
   factory AudioItem.fromJson(Map<String, dynamic> j) => AudioItem(
@@ -299,6 +550,9 @@ class AudioItem {
         fx: _enum(AudioFx.values, j['fx'], AudioFx.none),
         isVoice: (j['isVoice'] as bool?) ?? true,
         denoise: (j['denoise'] as bool?) ?? false,
+        sourceStart: Duration(microseconds: (j['sourceStart'] as int?) ?? 0),
+        fadeIn: Duration(microseconds: (j['fadeIn'] as int?) ?? 0),
+        fadeOut: Duration(microseconds: (j['fadeOut'] as int?) ?? 0),
       );
 }
 
@@ -340,6 +594,11 @@ class PipLayer {
     this.toCx,
     this.toCy,
     this.volume = 1.0,
+    this.rotation = 0,
+    this.toScale,
+    this.toRotation,
+    this.track,
+    this.bgMask,
   })  : trimStart = trimStart ?? Duration.zero,
         trimEnd = trimEnd ?? sourceDuration;
 
@@ -374,21 +633,40 @@ class PipLayer {
   double? toCy;
   double volume;
 
+  /// Rotazione in radianti, e keyframe finali di scala e rotazione.
+  double rotation;
+  double? toScale;
+  double? toRotation;
+
+  /// Percorso del tracciamento (terne t, x, y), o null.
+  List<double>? track;
+
+  /// Video maschera per la rimozione dello sfondo, o null.
+  String? bgMask;
+
   Duration get duration => trimEnd - trimStart;
   Duration get end => start + duration;
   bool visibleAt(Duration t) => t >= start && t < end;
 
-  /// Posizione all'istante [t] (con keyframe).
+  double _progress(Duration t) => duration.inMicroseconds <= 0
+      ? 0.0
+      : ((t - start).inMicroseconds / duration.inMicroseconds).clamp(0.0, 1.0);
+
+  /// Posizione all'istante [t] (con keyframe o tracciamento).
   Offset centerAt(Duration t) {
-    final k = duration.inMicroseconds <= 0
-        ? 0.0
-        : ((t - start).inMicroseconds / duration.inMicroseconds).clamp(0.0, 1.0);
+    final d = trackDelta(track, (t - start).inMicroseconds / 1e6);
+    if (d != null) return Offset(cx, cy) + d;
+    final k = _progress(t);
     return Offset(cx + ((toCx ?? cx) - cx) * k, cy + ((toCy ?? cy) - cy) * k);
   }
 
+  double scaleAt(Duration t) => scale + ((toScale ?? scale) - scale) * _progress(t);
+  double rotationAt(Duration t) => rotation + ((toRotation ?? rotation) - rotation) * _progress(t);
+  double get maxScale => math.max(scale, toScale ?? scale);
+
   /// Dimensioni in pixel nel video finale (pari, come vuole x264).
-  (int, int) pixelSize(int frameWidth) {
-    final w = ((frameWidth * scale) / 2).round() * 2;
+  (int, int) pixelSize(int frameWidth, [double? atScale]) {
+    final w = ((frameWidth * (atScale ?? scale)) / 2).round() * 2;
     final h = ((w * height / width) / 2).round() * 2;
     return (math.max(2, w), math.max(2, h));
   }
@@ -415,6 +693,11 @@ class PipLayer {
         'toCx': toCx,
         'toCy': toCy,
         'volume': volume,
+        'rotation': rotation,
+        'toScale': toScale,
+        'toRotation': toRotation,
+        'track': track,
+        'bgMask': bgMask,
       };
 
   factory PipLayer.fromJson(Map<String, dynamic> j) => PipLayer(
@@ -437,6 +720,11 @@ class PipLayer {
         toCx: (j['toCx'] as num?)?.toDouble(),
         toCy: (j['toCy'] as num?)?.toDouble(),
         volume: (j['volume'] as num?)?.toDouble() ?? 1.0,
+        rotation: (j['rotation'] as num?)?.toDouble() ?? 0,
+        toScale: (j['toScale'] as num?)?.toDouble(),
+        toRotation: (j['toRotation'] as num?)?.toDouble(),
+        track: (j['track'] as List?)?.map((e) => (e as num).toDouble()).toList(),
+        bgMask: j['bgMask'] as String?,
       );
 }
 
@@ -489,6 +777,9 @@ class VideoOverlay {
     this.animOut = AnimOut.fade,
     this.toCx,
     this.toCy,
+    this.toScale,
+    this.toRotation,
+    this.track,
   });
 
   OverlayKind kind;
@@ -510,12 +801,29 @@ class VideoOverlay {
   double? toCx;
   double? toCy;
 
-  /// Centro senza animazioni di entrata/uscita, con il keyframe applicato.
-  Offset centerAt(Duration t) {
+  /// Keyframe finali: scala (moltiplicatore) e rotazione (radianti).
+  double? toScale;
+  double? toRotation;
+
+  /// Percorso del tracciamento (terne t, x, y), o null.
+  List<double>? track;
+
+  double _progress(Duration t) {
     final len = (end - start).inMicroseconds;
-    final k = len <= 0 ? 0.0 : ((t - start).inMicroseconds / len).clamp(0.0, 1.0);
+    return len <= 0 ? 0.0 : ((t - start).inMicroseconds / len).clamp(0.0, 1.0);
+  }
+
+  /// Centro senza animazioni di entrata/uscita, con keyframe o tracciamento.
+  Offset centerAt(Duration t) {
+    final d = trackDelta(track, (t - start).inMicroseconds / 1e6);
+    if (d != null) return Offset(cx, cy) + d;
+    final k = _progress(t);
     return Offset(cx + ((toCx ?? cx) - cx) * k, cy + ((toCy ?? cy) - cy) * k);
   }
+
+  /// Moltiplicatore di scala e rotazione aggiuntiva all'istante [t].
+  double scaleAt(Duration t) => 1 + ((toScale ?? 1) - 1) * _progress(t);
+  double extraRotationAt(Duration t) => toRotation == null ? 0 : (toRotation! - rotation) * _progress(t);
   AnimIn animIn;
   AnimOut animOut;
 
@@ -584,6 +892,9 @@ class VideoOverlay {
         'animOut': animOut.name,
         'toCx': toCx,
         'toCy': toCy,
+        'toScale': toScale,
+        'toRotation': toRotation,
+        'track': track,
       };
 
   factory VideoOverlay.fromJson(Map<String, dynamic> j) => VideoOverlay(
@@ -603,6 +914,9 @@ class VideoOverlay {
         animOut: _enum(AnimOut.values, j['animOut'], AnimOut.none),
         toCx: (j['toCx'] as num?)?.toDouble(),
         toCy: (j['toCy'] as num?)?.toDouble(),
+        toScale: (j['toScale'] as num?)?.toDouble(),
+        toRotation: (j['toRotation'] as num?)?.toDouble(),
+        track: (j['track'] as List?)?.map((e) => (e as num).toDouble()).toList(),
       );
 }
 
@@ -680,6 +994,10 @@ class Project {
   AspectRatioPreset aspect;
   CanvasBackground background = CanvasBackground.blur;
 
+  /// Risoluzione (lato corto, in pixel) e fotogrammi al secondo dell'export.
+  int resolution = 1080;
+  int fps = 30;
+
   /// Durata effettiva della transizione tra la clip [i] e la [i+1]
   /// (0 se nessuna; limitata per non superare metà delle due clip).
   Duration transitionAfter(int i) {
@@ -737,9 +1055,11 @@ class Project {
   Project copy() => Project.fromJson(toJson());
 
   Map<String, dynamic> toJson() => {
-        'version': 3,
+        'version': 4,
         'aspect': aspect.name,
         'background': background.name,
+        'resolution': resolution,
+        'fps': fps,
         'clips': [for (final c in clips) c.toJson()],
         'overlays': [for (final o in overlays) o.toJson()],
         'audios': [for (final a in audios) a.toJson()],
@@ -761,6 +1081,8 @@ class Project {
     p.overlays.addAll([
       for (final o in (j['overlays'] as List)) VideoOverlay.fromJson(o as Map<String, dynamic>)
     ]);
+    p.resolution = (j['resolution'] as int?) ?? 1080;
+    p.fps = (j['fps'] as int?) ?? 30;
     p.audios.addAll([
       for (final a in (j['audios'] as List? ?? const [])) AudioItem.fromJson(a as Map<String, dynamic>)
     ]);

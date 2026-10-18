@@ -734,9 +734,10 @@ Future<bool?> showMotionSheet(BuildContext context,
         ),
         const Text(
           'Come si usa:\n'
-          '• porta la testina verso l\'INIZIO dell\'elemento e trascinalo dove deve partire;\n'
-          '• porta la testina verso la FINE e trascinalo dove deve arrivare.\n'
-          'Nel mezzo si sposta da solo.',
+          '• porta la testina nella PRIMA metà dell\'elemento e mettilo come deve iniziare;\n'
+          '• porta la testina nella SECONDA metà e mettilo come deve finire.\n'
+          'Con un dito lo sposti, con due dita lo ingrandisci e lo ruoti: '
+          'posizione, zoom e rotazione cambiano da soli nel mezzo.',
           style: TextStyle(fontSize: 13, color: Colors.white70, height: 1.4),
         ),
         _done(ctx),
@@ -788,5 +789,241 @@ Future<(ProjectTemplate, String)?> showTemplateSheet(BuildContext context, List<
         ]),
       ),
     ),
+  );
+}
+
+// ─────────────────────────── Novità v0.4 ───────────────────────────
+
+Future<bool?> showSpeedCurveSheet(BuildContext context, VideoClip clip) {
+  return _sheet<bool>(
+    context,
+    'Curva di velocità',
+    StatefulBuilder(builder: (ctx, setState) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Rallenta e accelera dentro la stessa clip, come in CapCut.',
+            style: TextStyle(fontSize: 13, color: Colors.white60)),
+        const SizedBox(height: 12),
+        GridView.count(
+          crossAxisCount: 4,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          mainAxisSpacing: 10,
+          crossAxisSpacing: 10,
+          childAspectRatio: 0.9,
+          children: [
+            for (final c in SpeedCurve.values)
+              GestureDetector(
+                onTap: () => setState(() => clip.speedCurve = c),
+                child: Column(children: [
+                  Expanded(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2A2B31),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                            color: clip.speedCurve == c ? Theme.of(ctx).colorScheme.primary : Colors.transparent,
+                            width: 2.5),
+                      ),
+                      padding: const EdgeInsets.all(8),
+                      child: CustomPaint(painter: _CurvePainter(c.points, Theme.of(ctx).colorScheme.primary)),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(c.label, style: const TextStyle(fontSize: 11)),
+                ]),
+              ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text('Durata risultante: ${fmt(clip.outputDuration)}', style: const TextStyle(color: Colors.white70)),
+        _done(ctx),
+      ]);
+    }),
+  );
+}
+
+class _CurvePainter extends CustomPainter {
+  _CurvePainter(this.points, this.color);
+  final List<double>? points;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final pts = points ?? const [1.0, 1.0];
+    final path = Path();
+    for (var i = 0; i < pts.length; i++) {
+      final x = pts.length == 1 ? size.width / 2 : i / (pts.length - 1) * size.width;
+      final y = size.height - (pts[i].clamp(0.0, 3.0) / 3.0) * size.height;
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        final px = (i - 1) / (pts.length - 1) * size.width;
+        final py = size.height - (pts[i - 1].clamp(0.0, 3.0) / 3.0) * size.height;
+        path.cubicTo((px + x) / 2, py, (px + x) / 2, y, x, y);
+      }
+    }
+    canvas.drawLine(Offset(0, size.height * 2 / 3), Offset(size.width, size.height * 2 / 3),
+        Paint()..color = Colors.white12);
+    canvas.drawPath(
+        path,
+        Paint()
+          ..color = points == null ? Colors.white38 : color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2);
+  }
+
+  @override
+  bool shouldRepaint(covariant _CurvePainter old) => old.points != points;
+}
+
+Future<bool?> showAdjustSheet(BuildContext context, VideoClip clip, {VoidCallback? onLive, VoidCallback? applyToAll}) {
+  return _sheet<bool>(
+    context,
+    'Regola',
+    StatefulBuilder(builder: (ctx, setState) {
+      final a = clip.adjust;
+      Widget row(String label, double value, double min, double max, ColorAdjust Function(double) set) => Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+              Slider(
+                min: min,
+                max: max,
+                value: value.clamp(min, max),
+                onChanged: (v) {
+                  setState(() => clip.adjust = set(v));
+                  onLive?.call();
+                },
+              ),
+            ],
+          );
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        row('Luminosità', a.brightness, -0.3, 0.3, (v) => a.copyWith(brightness: v)),
+        row('Contrasto', a.contrast, 0.5, 1.5, (v) => a.copyWith(contrast: v)),
+        row('Saturazione', a.saturation, 0, 2, (v) => a.copyWith(saturation: v)),
+        row('Temperatura', a.warmth, -1, 1, (v) => a.copyWith(warmth: v)),
+        row('Nitidezza', a.sharpen, 0, 1, (v) => a.copyWith(sharpen: v)),
+        Row(children: [
+          TextButton(
+            onPressed: () {
+              setState(() => clip.adjust = const ColorAdjust());
+              onLive?.call();
+            },
+            child: const Text('Azzera'),
+          ),
+          const Spacer(),
+          if (applyToAll != null) TextButton(onPressed: applyToAll, child: const Text('Applica a tutte')),
+        ]),
+        _done(ctx),
+      ]);
+    }),
+  );
+}
+
+Future<bool?> showCropSheet(BuildContext context, VideoClip clip, {VoidCallback? onLive}) {
+  return _sheet<bool>(
+    context,
+    'Ritaglia',
+    StatefulBuilder(builder: (ctx, setState) {
+      void set(VoidCallback f) {
+        setState(f);
+        onLive?.call();
+      }
+
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Ingrandimento ${clip.cropZoom.toStringAsFixed(2)}x'),
+        Slider(min: 1, max: 3, value: clip.cropZoom, onChanged: (v) => set(() => clip.cropZoom = v)),
+        const Text('Orizzontale'),
+        Slider(min: -1, max: 1, value: clip.cropX, onChanged: clip.hasCrop ? (v) => set(() => clip.cropX = v) : null),
+        const Text('Verticale'),
+        Slider(min: -1, max: 1, value: clip.cropY, onChanged: clip.hasCrop ? (v) => set(() => clip.cropY = v) : null),
+        TextButton(
+          onPressed: () => set(() {
+            clip.cropZoom = 1;
+            clip.cropX = 0;
+            clip.cropY = 0;
+          }),
+          child: const Text('Azzera'),
+        ),
+        _done(ctx),
+      ]);
+    }),
+  );
+}
+
+Future<bool?> showAudioFadeSheet(BuildContext context,
+    {required Duration fadeIn, required Duration fadeOut, required void Function(Duration, Duration) onChanged}) {
+  var fi = fadeIn.inMilliseconds / 1000, fo = fadeOut.inMilliseconds / 1000;
+  return _sheet<bool>(
+    context,
+    'Dissolvenza audio',
+    StatefulBuilder(builder: (ctx, setState) {
+      void push() => onChanged(_sec(fi), _sec(fo));
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Entrata ${fi.toStringAsFixed(1)} s'),
+        Slider(min: 0, max: 5, divisions: 50, value: fi, onChanged: (v) => setState(() {
+              fi = v;
+              push();
+            })),
+        Text('Uscita ${fo.toStringAsFixed(1)} s'),
+        Slider(min: 0, max: 5, divisions: 50, value: fo, onChanged: (v) => setState(() {
+              fo = v;
+              push();
+            })),
+        _done(ctx),
+      ]);
+    }),
+  );
+}
+
+/// Qualità di esportazione. Restituisce true per avviare l'export.
+Future<bool?> showExportSheet(BuildContext context, Project p) {
+  const resolutions = [(720, '720p'), (1080, '1080p'), (1440, '2K'), (2160, '4K')];
+  const rates = [24, 25, 30, 60];
+  return showModalBottomSheet<bool>(
+    context: context,
+    showDragHandle: true,
+    backgroundColor: const Color(0xFF1A1B20),
+    builder: (ctx) => StatefulBuilder(builder: (ctx, setState) {
+      final k = p.resolution / 1080;
+      final w = (p.aspect.width * k / 2).round() * 2, h = (p.aspect.height * k / 2).round() * 2;
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Esporta', style: Theme.of(ctx).textTheme.titleLarge),
+          const SizedBox(height: 14),
+          const Text('Risoluzione', style: TextStyle(color: Colors.white60, fontSize: 12)),
+          const SizedBox(height: 6),
+          Wrap(spacing: 8, children: [
+            for (final r in resolutions)
+              ChoiceChip(label: Text(r.$2), selected: p.resolution == r.$1, onSelected: (_) => setState(() => p.resolution = r.$1)),
+          ]),
+          const SizedBox(height: 14),
+          const Text('Fotogrammi al secondo', style: TextStyle(color: Colors.white60, fontSize: 12)),
+          const SizedBox(height: 6),
+          Wrap(spacing: 8, children: [
+            for (final r in rates)
+              ChoiceChip(label: Text('$r'), selected: p.fps == r, onSelected: (_) => setState(() => p.fps = r)),
+          ]),
+          const SizedBox(height: 12),
+          Text('${w}×$h · ${p.fps} fps · durata ${fmt(p.totalDuration)}', style: const TextStyle(color: Colors.white70)),
+          if (p.resolution >= 1440 || p.fps >= 60)
+            const Padding(
+              padding: EdgeInsets.only(top: 6),
+              child: Text('Qualità alta: l\'esportazione richiederà più tempo.',
+                  style: TextStyle(fontSize: 12, color: Color(0xFFFFB547))),
+            ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: () => Navigator.pop(ctx, true),
+              icon: const Icon(Icons.ios_share_rounded),
+              label: const Text('Esporta'),
+            ),
+          ),
+        ]),
+      );
+    }),
   );
 }
