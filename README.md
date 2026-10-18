@@ -41,6 +41,10 @@ Flutter e usa FFmpeg per l'esportazione.
 - **Estrai audio** dalla clip e **dissolvenze audio** in entrata e in uscita.
 - **Esportazione** a 720p, 1080p, 2K o 4K, con 24, 25, 30 o 60 fps.
 
+### Novità v0.5
+
+- **Meme video**: scegli "Crea meme" nella schermata iniziale, oppure "Meme" nell'editor. Il video si restringe al centro, e sopra e sotto compaiono due fasce nere o bianche con il testo. Il testo si adatta da solo alla fascia, e puoi regolare l'altezza delle fasce e il formato.
+
 ## Avvio rapido
 
 Ti servono Flutter 3.27 o più recente, Android Studio e/o Xcode (per iOS

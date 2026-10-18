@@ -125,6 +125,20 @@ void main() {
     expect(g, contains('atempo=3.0000'));
   });
 
+  test('meme: clip nella fascia centrale e fasce colorate', () {
+    final p = sample()
+      ..aspect = AspectRatioPreset.square
+      ..meme = true
+      ..memeTop = 0.2
+      ..memeBottom = 0.1
+      ..memeWhite = true;
+    expect(p.videoBand(1080), (216, 756));
+    final args = ExportCommand(project: p, outputPath: '/o.mp4').build();
+    final g = args[args.indexOf('-filter_complex') + 1];
+    expect(g, contains('scale=1080:756:force_original_aspect_ratio'));
+    expect(g, contains('pad=1080:1080:0:216:color=white[vmeme]'));
+  });
+
   test('progetto vuoto lancia un errore', () {
     expect(() => ExportCommand(project: Project(), outputPath: '/o.mp4').build(), throwsStateError);
   });
@@ -138,7 +152,9 @@ void main() {
       final p = Project()
         ..background = bg
         ..resolution = bg == CanvasBackground.blur ? 720 : 1080
-        ..fps = bg == CanvasBackground.white ? 24 : 30;
+        ..fps = bg == CanvasBackground.white ? 24 : 30
+        ..meme = bg == CanvasBackground.black
+        ..memeWhite = false;
       final effects = ClipEffect.values;
       final transitions = TransitionType.values;
       final n = transitions.length;

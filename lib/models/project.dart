@@ -779,6 +779,7 @@ class VideoOverlay {
     this.toScale,
     this.toRotation,
     this.track,
+    this.tag,
   });
 
   OverlayKind kind;
@@ -806,6 +807,10 @@ class VideoOverlay {
 
   /// Percorso del tracciamento (terne t, x, y), o null.
   List<double>? track;
+
+  /// Ruolo speciale: 'meme-top' / 'meme-bottom' per i testi del meme.
+  String? tag;
+  bool get isMeme => tag != null && tag!.startsWith('meme');
 
   double _progress(Duration t) {
     final len = (end - start).inMicroseconds;
@@ -894,6 +899,7 @@ class VideoOverlay {
         'toScale': toScale,
         'toRotation': toRotation,
         'track': track,
+        'tag': tag,
       };
 
   factory VideoOverlay.fromJson(Map<String, dynamic> j) => VideoOverlay(
@@ -916,6 +922,7 @@ class VideoOverlay {
         toScale: (j['toScale'] as num?)?.toDouble(),
         toRotation: (j['toRotation'] as num?)?.toDouble(),
         track: (j['track'] as List?)?.map((e) => (e as num).toDouble()).toList(),
+        tag: j['tag'] as String?,
       );
 }
 
@@ -997,6 +1004,20 @@ class Project {
   int resolution = 1080;
   int fps = 30;
 
+  /// Modalità meme: fasce sopra e sotto (frazioni dell'altezza) con il testo.
+  bool meme = false;
+  double memeTop = 0.18;
+  double memeBottom = 0.18;
+  bool memeWhite = false;
+
+  /// Zona occupata dal video (in pixel del formato base), pari per x264.
+  (int top, int height) videoBand(int h) {
+    if (!meme) return (0, h);
+    final top = ((h * memeTop) / 2).round() * 2;
+    final bottom = ((h * memeBottom) / 2).round() * 2;
+    return (top, (h - top - bottom).clamp(2, h));
+  }
+
   /// Durata effettiva della transizione tra la clip [i] e la [i+1]
   /// (0 se nessuna; limitata per non superare metà delle due clip).
   Duration transitionAfter(int i) {
@@ -1040,6 +1061,13 @@ class Project {
   /// Tiene testi, sticker, audio e sovrapposizioni dentro la durata del video.
   void clampOverlays() {
     final total = totalDuration;
+    // I testi del meme restano per tutta la durata.
+    for (final o in overlays) {
+      if (o.isMeme) {
+        o.start = Duration.zero;
+        o.end = total;
+      }
+    }
     overlays.removeWhere((o) => o.start >= total);
     for (final o in overlays) {
       if (o.end > total) o.end = total;
@@ -1059,6 +1087,10 @@ class Project {
         'background': background.name,
         'resolution': resolution,
         'fps': fps,
+        'meme': meme,
+        'memeTop': memeTop,
+        'memeBottom': memeBottom,
+        'memeWhite': memeWhite,
         'clips': [for (final c in clips) c.toJson()],
         'overlays': [for (final o in overlays) o.toJson()],
         'audios': [for (final a in audios) a.toJson()],
@@ -1082,6 +1114,10 @@ class Project {
     ]);
     p.resolution = (j['resolution'] as int?) ?? 1080;
     p.fps = (j['fps'] as int?) ?? 30;
+    p.meme = (j['meme'] as bool?) ?? false;
+    p.memeTop = (j['memeTop'] as num?)?.toDouble() ?? 0.18;
+    p.memeBottom = (j['memeBottom'] as num?)?.toDouble() ?? 0.18;
+    p.memeWhite = (j['memeWhite'] as bool?) ?? false;
     p.audios.addAll([
       for (final a in (j['audios'] as List? ?? const [])) AudioItem.fromJson(a as Map<String, dynamic>)
     ]);

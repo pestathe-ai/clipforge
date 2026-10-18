@@ -25,9 +25,9 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) setState(() => _last = p);
   }
 
-  Future<void> _open(Project p, {bool pick = true}) async {
+  Future<void> _open(Project p, {bool pick = true, bool meme = false}) async {
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => EditorScreen(project: p, pickOnStart: pick)),
+      MaterialPageRoute(builder: (_) => EditorScreen(project: p, pickOnStart: pick, memeOnStart: meme)),
     );
     _reload();
   }
@@ -66,6 +66,31 @@ class _HomeScreenState extends State<HomeScreen> {
                     SizedBox(width: 12),
                     Text('Nuovo progetto',
                         style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.black)),
+                  ]),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 12),
+            Material(
+              color: const Color(0xFF1C1D22),
+              borderRadius: BorderRadius.circular(18),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(18),
+                onTap: () => _open(Project(aspect: AspectRatioPreset.square), meme: true),
+                child: const SizedBox(
+                  height: 72,
+                  child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    Icon(Icons.sentiment_very_satisfied_rounded, size: 28),
+                    SizedBox(width: 10),
+                    Text('Crea meme', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+                    SizedBox(width: 8),
+                    Flexible(
+                      child: Text('fasce sopra e sotto con il testo',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 12, color: Colors.white54)),
+                    ),
                   ]),
                 ),
               ),

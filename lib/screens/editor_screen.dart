@@ -20,14 +20,18 @@ import '../services/subtitle_service.dart';
 import '../state/history.dart';
 import '../state/layer_players.dart';
 import '../widgets/edit_sheets.dart';
+import '../widgets/meme_sheet.dart';
 import '../widgets/subtitle_sheet.dart';
 import '../widgets/timeline.dart';
 import '../widgets/voice_sheet.dart';
 
 class EditorScreen extends StatefulWidget {
-  const EditorScreen({super.key, required this.project, this.pickOnStart = true});
+  const EditorScreen({super.key, required this.project, this.pickOnStart = true, this.memeOnStart = false});
   final Project project;
   final bool pickOnStart;
+
+  /// Apre il pannello Meme dopo aver scelto il video.
+  final bool memeOnStart;
 
   @override
   State<EditorScreen> createState() => _EditorScreenState();
@@ -349,7 +353,26 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     } finally {
       if (mounted) setState(() => _busy = null);
     }
-    if (added > 0) _commit();
+    if (added > 0) {
+      _commit();
+      if (widget.memeOnStart && !_memeOpened) {
+        _memeOpened = true;
+        await _openMeme();
+      }
+    }
+  }
+
+  bool _memeOpened = false;
+
+  Future<void> _openMeme() async {
+    if (_p.clips.isEmpty) return _toast('Aggiungi prima un video');
+    await _pause();
+    if (!mounted) return;
+    final ok = await showMemeSheet(context, _p);
+    if (ok == true) {
+      _selection = const Selection.none();
+      _commit();
+    }
   }
 
   Future<void> _loadMusic(String path) async {
@@ -467,6 +490,7 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
 
   Future<void> _addOrEditText([int? index]) async {
     if (_p.clips.isEmpty) return _toast('Aggiungi prima un video');
+    if (index != null && _p.overlays[index].isMeme) return _openMeme();
     await _pause();
     if (!mounted) return;
     final res = await showTextSheet(
@@ -919,12 +943,13 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
     final odd = c.quarterTurns.isOdd;
     final sw = (odd ? c.height : c.width).toDouble(), sh = (odd ? c.width : c.height).toDouble();
     final vw = sw / c.cropZoom, vh = sh / c.cropZoom;
-    final cw = _p.aspect.width.toDouble(), ch = _p.aspect.height.toDouble();
+    final (bandTop, bandH) = _p.videoBand(_p.aspect.height);
+    final cw = _p.aspect.width.toDouble(), ch = bandH.toDouble(), fullH = _p.aspect.height.toDouble();
     final sc = math.min(cw / vw, ch / vh);
     final ox = (cw - vw * sc) / 2, oy = (ch - vh * sc) / 2;
     final pos = (pip?.centerAt(start) ?? ov!.centerAt(start));
     final fx = ((pos.dx * cw - ox) / (vw * sc)).clamp(0.02, 0.98);
-    final fy = ((pos.dy * ch - oy) / (vh * sc)).clamp(0.02, 0.98);
+    final fy = ((pos.dy * fullH - bandTop - oy) / (vh * sc)).clamp(0.02, 0.98);
 
     final clipEnd = _p.startOf(ci) + c.outputDuration;
     final len = (end < clipEnd ? end : clipEnd) - start;
@@ -956,7 +981,7 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
       // Coordinate della clip → coordinate del fotogramma finale.
       for (var k = 0; k + 2 < path.length; k += 3) {
         path[k + 1] = (ox + path[k + 1] * vw * sc) / cw;
-        path[k + 2] = (oy + path[k + 2] * vh * sc) / ch;
+        path[k + 2] = (bandTop + oy + path[k + 2] * vh * sc) / fullH;
       }
       if (pip != null) {
         pip
@@ -1208,7 +1233,17 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
             },
             child: ClipRect(
               child: Stack(fit: StackFit.expand, children: [
-                frame,
+                if (_p.meme) ...[
+                  ColoredBox(color: _p.memeWhite ? Colors.white : Colors.black),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: size.height * _p.memeTop,
+                    bottom: size.height * _p.memeBottom,
+                    child: ClipRect(child: frame),
+                  ),
+                ] else
+                  frame,
                 for (var k = 0; k < _p.pips.length; k++)
                   if (_p.pips[k].visibleAt(_position)) _pipWidget(k, size),
                 CustomPaint(
@@ -1527,6 +1562,7 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
       case SelectionKind.transition:
         items.addAll([
           _Tool(Icons.content_cut_rounded, 'Dividi', _p.clips.isEmpty ? null : _splitClip),
+          _Tool(Icons.sentiment_very_satisfied_rounded, 'Meme', _openMeme),
           _Tool(Icons.dashboard_customize_rounded, 'Modelli', _applyTemplate),
           _Tool(Icons.music_note_rounded, 'Musica', _addMusic),
           _Tool(Icons.mic_rounded, 'Voce', _recordVoice),

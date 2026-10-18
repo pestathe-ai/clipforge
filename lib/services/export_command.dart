@@ -48,6 +48,8 @@ class ExportCommand {
     if (p.clips.isEmpty) throw StateError('Il progetto non contiene clip.');
     final k = p.resolution / 1080;
     final w = _even(p.aspect.width * k), h = _even(p.aspect.height * k);
+    // In modalità meme le clip occupano solo la fascia centrale.
+    final (bandTop, ch) = p.videoBand(h);
     final args = <String>['-y'];
     final f = <String>[];
     var input = 0;
@@ -111,19 +113,19 @@ class ExportCommand {
             : 'drawbox=c=${p.background == CanvasBackground.white ? 'white' : 'black'}:t=fill';
         chain
           ..write(',split[bs$i][fs$i];')
-          ..write('[bs$i]format=yuv420p,scale=$w:$h:force_original_aspect_ratio=increase,'
-              'crop=$w:$h,$bg[bg$i];')
-          ..write('[fs$i]scale=$w:$h:force_original_aspect_ratio=decrease[fg$i];')
+          ..write('[bs$i]format=yuv420p,scale=$w:$ch:force_original_aspect_ratio=increase,'
+              'crop=$w:$ch,$bg[bg$i];')
+          ..write('[fs$i]scale=$w:$ch:force_original_aspect_ratio=decrease[fg$i];')
           ..write('[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2');
       } else {
         final color = p.background == CanvasBackground.white ? 'white' : 'black';
-        chain.write(',scale=$w:$h:force_original_aspect_ratio=decrease,'
-            'pad=$w:$h:(ow-iw)/2:(oh-ih)/2:color=$color');
+        chain.write(',scale=$w:$ch:force_original_aspect_ratio=decrease,'
+            'pad=$w:$ch:(ow-iw)/2:(oh-ih)/2:color=$color');
       }
       chain.write(',setsar=1,format=yuv420p');
       if (c.filter.ffmpeg != null) chain.write(',${c.filter.ffmpeg}');
       if (c.adjust.ffmpeg != null) chain.write(',${c.adjust.ffmpeg}');
-      final fx = _effect(c.effect, w, h, frames, fps);
+      final fx = _effect(c.effect, w, ch, frames, fps);
       if (fx != null) chain.write(',$fx');
       chain.write(',settb=AVTB[v$i]');
       f.add(chain.toString());
@@ -149,6 +151,12 @@ class ExportCommand {
       }
       vCur = vNext;
       aCur = aNext;
+    }
+
+    if (p.meme) {
+      final color = p.memeWhite ? 'white' : 'black';
+      f.add('[$vCur]pad=$w:$h:0:$bandTop:color=$color[vmeme]');
+      vCur = 'vmeme';
     }
 
     final total = p.totalDuration;
