@@ -481,7 +481,6 @@ Offset? trackDelta(List<double>? track, double tRel) {
   }
   return Offset(track[(n - 1) * 3 + 1] - x0, track[(n - 1) * 3 + 2] - y0);
 }
-}
 
 // ─────────────────────────── Effetti audio ───────────────────────────
 

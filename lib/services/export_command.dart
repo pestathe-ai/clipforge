@@ -391,7 +391,8 @@ class ExportCommand {
     final v0 = pts.first.$2;
     final terms = <String>[];
     for (var i = 0; i + 1 < pts.length; i++) {
-      final (ta, va) = pts[i], (tb, vb) = pts[i + 1];
+      final (ta, va) = pts[i];
+      final (tb, vb) = pts[i + 1];
       final a = (start + ta).toStringAsFixed(3), b = (start + tb).toStringAsFixed(3);
       final span = math.max(1e-3, tb - ta).toStringAsFixed(3);
       terms.add('gte(t,$a)*lt(t,$b)*(${_d(va - v0)}+(${_d(vb - va)})*(t-$a)/$span)');
