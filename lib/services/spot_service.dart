@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
@@ -5,467 +6,610 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:google_mlkit_subject_segmentation/google_mlkit_subject_segmentation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/project.dart';
+import 'ai_spot_service.dart' show ShotRole;
+import 'photo_analysis.dart';
 
-enum SpotStyle {
-  luxury('Lusso scuro', 'Luci calde, dissolvenze al nero, testi oro'),
-  sport('Sportivo', 'Ritmo veloce, zoom e flash'),
-  minimal('Minimal', 'Pulito, luminoso, testi semplici');
+export 'photo_analysis.dart' show analyzePhoto;
 
-  const SpotStyle(this.label, this.description);
-  final String label;
-  final String description;
-}
-
-class SpotOptions {
-  const SpotOptions({
-    required this.title,
-    this.subtitle = '',
-    this.endText = '',
-    this.style = SpotStyle.luxury,
-    this.seconds = 20,
+/// Richiesta per lo spot gratuito (solo foto, tutto sul telefono).
+class SpotRequest {
+  SpotRequest({
+    required this.photos,
+    required this.brand,
+    this.endLine = '',
     this.aspect = AspectRatioPreset.portrait,
   });
-  final String title;
-  final String subtitle;
-  final String endText;
-  final SpotStyle style;
-  final int seconds;
+  final List<(String, ShotRole)> photos;
+  final String brand;
+  final String endLine;
   final AspectRatioPreset aspect;
 }
 
-/// Foto preparata: orientata correttamente, con soggetto e dettagli trovati.
-class _Photo {
-  _Photo(this.path, this.w, this.h, this.subject, this.details);
+class _Still {
+  _Still(this.path, this.w, this.h, this.role, {this.isCutout = false});
   final String path;
   final int w, h;
-
-  /// Riquadro del soggetto in pixel (x, y, w, h).
-  final Rect subject;
-
-  /// Centri e dimensioni (lato in pixel) dei dettagli più ricchi.
-  final List<(Offset, double)> details;
+  final ShotRole role;
+  final bool isCutout;
 }
 
-/// Crea uno "spot prodotto" (stile pubblicità) partendo da foto:
-/// trova l'oggetto e i suoi dettagli e costruisce inquadrature con zoom
-/// macro, carrellate, leggere rotazioni e riflessi di luce.
+/// Spot in stile pubblicità di lusso costruito solo dalle foto:
+/// - macro in "low-key" (lo sfondo va al nero, brillano metallo e oro),
+/// - orologio intero ritagliato (ML Kit Subject Segmentation) su nero,
+/// - movimenti di camera lenti e costanti, tagli secchi, riflessi che
+///   scorrono sul metallo, emersione dal buio,
+/// - colonna sonora generata (ticchettio, salita, colpi bassi).
 class SpotService {
-  Future<Project> build(
-    List<String> photos,
-    SpotOptions o, {
-    void Function(String phase, double progress)? onProgress,
-  }) async {
+  Future<Project> build(SpotRequest r, {void Function(String phase, double progress)? onProgress}) async {
     final docs = await getApplicationDocumentsDirectory();
     final dir = Directory(p.join(docs.path, 'media', 'spot_${DateTime.now().millisecondsSinceEpoch}'));
     await dir.create(recursive: true);
+    final aspect = r.aspect.width / r.aspect.height;
 
-    final prepared = <_Photo>[];
-    for (var i = 0; i < photos.length; i++) {
-      onProgress?.call('Analizzo la foto ${i + 1} di ${photos.length}', i / (photos.length + 1));
-      final ph = await _prepare(photos[i], p.join(dir.path, 'foto_$i.png'));
-      if (ph != null) prepared.add(ph);
+    // 1) Prepara le foto.
+    final stills = <_Still>[];
+    var heroIndex = r.photos.indexWhere((e) => e.$2 == ShotRole.hero);
+    if (heroIndex < 0) heroIndex = 0;
+    for (var i = 0; i < r.photos.length; i++) {
+      final (path, role) = r.photos[i];
+      onProgress?.call('Preparo la foto ${i + 1} di ${r.photos.length}', i / (r.photos.length + 2));
+      if (i == heroIndex) {
+        final cut = await _cutout(path, p.join(dir.path, 'hero.png'), aspect);
+        if (cut != null) {
+          stills.add(cut);
+          continue;
+        }
+      }
+      stills.add(await _lowKey(path, p.join(dir.path, 'foto_$i.png'), i == heroIndex ? ShotRole.hero : role));
     }
-    if (prepared.isEmpty) throw StateError('Nessuna foto leggibile');
-    onProgress?.call('Preparo le inquadrature', 0.9);
-    final glint = await _renderGlint(p.join(dir.path, 'riflesso.png'));
-    final project = _direct(prepared, o, glint);
+    final hero = stills.firstWhere((s) => s.role == ShotRole.hero, orElse: () => stills.first);
+    final macros = stills.where((s) => !identical(s, hero)).toList()
+      ..sort((a, b) => _order(a.role).compareTo(_order(b.role)));
+
+    onProgress?.call('Monto lo spot', 0.85);
+    final black = await _solid(p.join(dir.path, 'nero.png'));
+    final project = Project(aspect: r.aspect)
+      ..background = CanvasBackground.black
+      ..fps = 30;
+
+    void add(String path, int w, int h, double secs, KenBurns? kb,
+        {ClipEffect effect = ClipEffect.spotlight, TransitionType tr = TransitionType.none, double trSecs = 0.45}) {
+      project.clips.add(VideoClip.image(path, duration: Duration(milliseconds: (secs * 1000).round()))
+        ..width = w
+        ..height = h
+        ..motion = kb
+        ..effect = effect
+        ..transition = tr
+        ..transitionDuration = Duration(milliseconds: (trSecs * 1000).round()));
+    }
+
+    // Frammenti macro: se le foto sono poche, si usano più zone della stessa foto.
+    final fragments = <(_Still, Offset, Offset, double)>[]; // foto, centro, spostamento, ingrandimento
+    final sources = macros.isEmpty ? [hero] : macros;
+    const spots = [Offset(0.5, 0.5), Offset(0.38, 0.42), Offset(0.62, 0.58), Offset(0.45, 0.62)];
+    const moves = [Offset(-0.06, 0), Offset(0.06, -0.03), Offset(0, -0.06), Offset(0.05, 0.04)];
+    for (var k = 0; fragments.length < 5; k++) {
+      final s = sources[k % sources.length];
+      final round = k ~/ sources.length;
+      final base = s.role == ShotRole.crown ? const Offset(0.5, 0.6) : spots[round % spots.length];
+      fragments.add((s, base, moves[k % moves.length], round == 0 ? 1.0 : 0.72));
+      if (k > 12) break;
+    }
+
+    // Apertura: dal buio sul primo dettaglio.
+    add(black, 16, 16, 0.8, null, effect: ClipEffect.none, tr: TransitionType.fadeBlack, trSecs: 0.35);
+    final (s0, c0, m0, z0) = fragments.first;
+    add(s0.path, s0.w, s0.h, 2.0, _move(s0, aspect, c0, m0, z0, 0.93), effect: ClipEffect.glint);
+    // Frammenti a tempo (tagli secchi).
+    for (final (s, c, m, z) in fragments.skip(1).take(4)) {
+      add(s.path, s.w, s.h, 0.75, _move(s, aspect, c, m, z, 0.95),
+          effect: identical(s, fragments[2].$1) ? ClipEffect.glint : ClipEffect.spotlight);
+    }
+    // Respiro al nero, poi l'orologio intero emerge dal buio.
+    add(black, 16, 16, 1.0, null, effect: ClipEffect.none, tr: TransitionType.fadeBlack, trSecs: 0.45);
+    add(hero.path, hero.w, hero.h, 4.6, _heroMove(hero, aspect, push: 0.9), effect: ClipEffect.glint);
+    add(hero.path, hero.w, hero.h, 1.9, _heroClose(hero, aspect), effect: ClipEffect.glint,
+        tr: TransitionType.fadeBlack, trSecs: 0.5);
+    // Chiusura sul marchio.
+    add(black, 16, 16, 3.0, null, effect: ClipEffect.none);
+
+    final total = project.totalDuration;
+    final endStart = project.startOf(project.clips.length - 1);
+    final brand = r.brand.trim().toUpperCase();
+    if (brand.isNotEmpty) {
+      project.overlays.add(VideoOverlay(
+        kind: OverlayKind.text,
+        text: brand.split('').join(' '),
+        start: endStart + const Duration(milliseconds: 250),
+        end: total,
+        color: const Color(0xFFE9EBEE),
+        fontSize: 70,
+        outline: false,
+        cy: 0.47,
+        animIn: AnimIn.fade,
+        animOut: AnimOut.none,
+      ));
+    }
+    if (r.endLine.trim().isNotEmpty) {
+      project.overlays.add(VideoOverlay(
+        kind: OverlayKind.text,
+        text: r.endLine.trim().toUpperCase(),
+        start: endStart + const Duration(milliseconds: 900),
+        end: total,
+        color: const Color(0xFFD9B97A),
+        fontSize: 30,
+        outline: false,
+        cy: 0.535,
+        animIn: AnimIn.fade,
+        animOut: AnimOut.none,
+      ));
+    }
+
+    // 3) Colonna sonora sui tagli.
+    onProgress?.call('Creo il sonoro', 0.95);
+    final cuts = [for (var i = 0; i < project.clips.length; i++) project.startOf(i).inMicroseconds / 1e6];
+    final wav = p.join(dir.path, 'sonoro.wav');
+    final heroCut = cuts[cuts.length - 3];
+    final blackCut = cuts[cuts.length - 4];
+    final endCut = cuts.last;
+    final totalS = total.inMicroseconds / 1e6;
+    final macroCuts = cuts.sublist(2, cuts.length - 4);
+    await Isolate.run(() => writeSpotSoundtrack(wav, totalS, macroCuts, blackCut, heroCut, endCut));
+    project.audios.add(AudioItem(path: wav, start: Duration.zero, duration: total, isVoice: false));
+
     onProgress?.call('Fatto', 1);
     return project;
   }
 
-  // ───────────────────────── Preparazione e analisi ─────────────────────────
+  static int _order(ShotRole r) => switch (r) {
+        ShotRole.dial => 0,
+        ShotRole.crown => 1,
+        ShotRole.logo => 2,
+        ShotRole.caseback => 3,
+        ShotRole.strap => 4,
+        ShotRole.box => 5,
+        ShotRole.hero => 6,
+      };
 
-  /// Decodifica la foto (rispettando l'orientamento EXIF), la riduce a
-  /// 3000 px sul lato lungo e la salva in PNG; poi cerca soggetto e dettagli.
-  Future<_Photo?> _prepare(String src, String out) async {
+  // ───────────────────────── Inquadrature ─────────────────────────
+
+  /// Movimento lineare dentro la finestra più grande con le proporzioni del
+  /// video, centrata su [c] (frazioni della foto). [zoom] ≤ 1 restringe la
+  /// finestra; [end] è il rapporto tra fine e inizio (lento avvicinamento).
+  KenBurns _move(_Still s, double a, Offset c, Offset shift, double zoom, double end) {
+    final win = _window(s, a, c);
+    final s0 = zoom.clamp(0.4, 1.0);
+    final s1 = (s0 * end).clamp(0.35, 1.0);
+    // Mai ingrandire oltre ~1,25 volte i pixel reali.
+    final minSize = (1080 / 1.25) / (win.width);
+    final a0 = math.max(s0, minSize).clamp(0.0, 1.0), a1 = math.max(s1, minSize).clamp(0.0, 1.0);
+    ShotRect rect(double size, Offset off) {
+      final x = (0.5 + off.dx - size / 2).clamp(0.0, 1 - size);
+      final y = (0.5 + off.dy - size / 2).clamp(0.0, 1 - size);
+      return ShotRect(x, y, size);
+    }
+
+    return KenBurns(
+      px: win.left / s.w,
+      py: win.top / s.h,
+      pw: win.width / s.w,
+      ph: win.height / s.h,
+      from: rect(a0, -shift / 2),
+      to: rect(a1, shift / 2),
+      linear: true,
+    );
+  }
+
+  Rect _window(_Still s, double a, Offset c) {
+    var w = s.w.toDouble(), h = w / a;
+    if (h > s.h) {
+      h = s.h.toDouble();
+      w = h * a;
+    }
+    final x = (c.dx * s.w - w / 2).clamp(0.0, s.w - w);
+    final y = (c.dy * s.h - h / 2).clamp(0.0, s.h - h);
+    return Rect.fromLTWH(x, y, w, h);
+  }
+
+  /// Orologio intero: lento avvicinamento con leggerissima salita.
+  KenBurns _heroMove(_Still s, double a, {required double push}) {
+    final win = _window(s, a, const Offset(0.5, 0.5));
+    return KenBurns(
+      px: win.left / s.w,
+      py: win.top / s.h,
+      pw: win.width / s.w,
+      ph: win.height / s.h,
+      from: const ShotRect(0, 0.02, 1),
+      to: ShotRect((1 - push) / 2, (1 - push) / 2 - 0.01, push),
+      linear: true,
+    );
+  }
+
+  /// Primo piano sulla cassa.
+  KenBurns _heroClose(_Still s, double a) {
+    final win = _window(s, a, const Offset(0.5, 0.5));
+    final minSize = (1080 / 1.25) / win.width;
+    final s0 = math.max(0.62, minSize).clamp(0.0, 1.0), s1 = math.max(0.56, minSize).clamp(0.0, 1.0);
+    return KenBurns(
+      px: win.left / s.w,
+      py: win.top / s.h,
+      pw: win.width / s.w,
+      ph: win.height / s.h,
+      from: ShotRect((1 - s0) / 2 + 0.02, (1 - s0) / 2 - 0.04, s0),
+      to: ShotRect((1 - s1) / 2 - 0.01, (1 - s1) / 2 - 0.05, s1),
+      rotFrom: -1.2,
+      rotTo: 1.2,
+      linear: true,
+    );
+  }
+
+  // ───────────────────────── Elaborazione foto ─────────────────────────
+
+  /// Decodifica (rispettando EXIF) riducendo a [maxSide] px.
+  static Future<ui.Image> _decode(String path, {int maxSide = 2200}) async {
+    final bytes = await File(path).readAsBytes();
+    final probe = (await (await ui.instantiateImageCodec(bytes)).getNextFrame()).image;
+    final w = probe.width, h = probe.height;
+    probe.dispose();
+    final k = math.min(1.0, maxSide / math.max(w, h));
+    return (await (await ui.instantiateImageCodec(bytes,
+                targetWidth: (w * k).round(), targetHeight: (h * k).round()))
+            .getNextFrame())
+        .image;
+  }
+
+  static Future<Uint8List> _rgba(ui.Image img) async =>
+      (await img.toByteData(format: ui.ImageByteFormat.rawRgba))!.buffer.asUint8List();
+
+  static Future<ui.Image> _fromRgba(Uint8List rgba, int w, int h) {
+    final c = Completer<ui.Image>();
+    ui.decodeImageFromPixels(rgba, w, h, ui.PixelFormat.rgba8888, c.complete);
+    return c.future;
+  }
+
+  static Future<void> _savePng(ui.Image img, String path) async {
+    final png = await img.toByteData(format: ui.ImageByteFormat.png);
+    await File(path).writeAsBytes(png!.buffer.asUint8List(), flush: true);
+  }
+
+  /// Foto macro in low-key: la pelle va al nero, metallo e oro restano.
+  Future<_Still> _lowKey(String src, String out, ShotRole role) async {
+    final img = await _decode(src);
+    final w = img.width, h = img.height;
+    final data = await _rgba(img);
+    img.dispose();
+    final res = await Isolate.run(() => gradePixels(data, w, h, lowKey: true));
+    final graded = await _fromRgba(res, w, h);
+    await _savePng(graded, out);
+    graded.dispose();
+    return _Still(out, w, h, role);
+  }
+
+  /// Orologio intero ritagliato su nero (solo Android: ML Kit Subject
+  /// Segmentation). Restituisce null se non è possibile.
+  Future<_Still?> _cutout(String src, String out, double a) async {
+    if (!Platform.isAndroid) return null;
     try {
-      final bytes = await File(src).readAsBytes();
-      final probe = await ui.instantiateImageCodec(bytes);
-      final first = await probe.getNextFrame();
-      final ow = first.image.width, oh = first.image.height;
-      first.image.dispose();
-      const maxSide = 3000;
-      final k = math.min(1.0, maxSide / math.max(ow, oh));
-      final codec = await ui.instantiateImageCodec(bytes,
-          targetWidth: (ow * k).round(), targetHeight: (oh * k).round());
-      final img = (await codec.getNextFrame()).image;
-      final png = await img.toByteData(format: ui.ImageByteFormat.png);
-      await File(out).writeAsBytes(png!.buffer.asUint8List(), flush: true);
+      final img = await _decode(src);
       final w = img.width, h = img.height;
+      final data = await _rgba(img);
+      final graded = await _fromRgba(await Isolate.run(() => gradePixels(data, w, h, lowKey: false)), w, h);
       img.dispose();
 
-      // Versione piccola per l'analisi.
-      const aw = 256;
-      final ah = math.max(8, (aw * h / w).round());
-      final small = await ui.instantiateImageCodec(bytes, targetWidth: aw, targetHeight: ah);
-      final simg = (await small.getNextFrame()).image;
-      final rgba = await simg.toByteData(format: ui.ImageByteFormat.rawRgba);
-      simg.dispose();
-      final data = rgba!.buffer.asUint8List();
-      final res = await Isolate.run(() => analyzePhoto(data, aw, ah));
+      // Segmentazione su una copia ridotta.
+      const segMax = 1024;
+      final k = math.min(1.0, segMax / math.max(w, h));
+      final sw = (w * k).round(), sh = (h * k).round();
+      final small = await _decode(src, maxSide: math.max(sw, sh));
+      final tmp = p.join(p.dirname(out), 'seg_in.png');
+      await _savePng(small, tmp);
+      final mw = small.width, mh = small.height;
+      small.dispose();
+      final seg = SubjectSegmenter(
+        options: SubjectSegmenterOptions(
+          enableForegroundBitmap: false,
+          enableForegroundConfidenceMask: true,
+          enableMultipleSubjects: SubjectResultOptions(enableConfidenceMask: false, enableSubjectBitmap: false),
+        ),
+      );
+      final result = await seg.processImage(InputImage.fromFilePath(tmp));
+      await seg.close();
+      final conf = result.foregroundConfidenceMask;
+      if (conf == null || conf.length < mw * mh) return null;
 
-      final sx = w / aw, sy = h / ah;
-      final subject = Rect.fromLTWH(res[0] * sx, res[1] * sy, res[2] * sx, res[3] * sy);
-      final details = <(Offset, double)>[];
-      for (var i = 4; i + 2 < res.length; i += 3) {
-        details.add((Offset(res[i] * sx, res[i + 1] * sy), res[i + 2] * sx));
+      // Maschera (alfa) e riquadro dell'oggetto.
+      final maskRgba = Uint8List(mw * mh * 4);
+      var minX = mw, minY = mh, maxX = -1, maxY = -1, count = 0;
+      for (var y = 0; y < mh; y++) {
+        for (var x = 0; x < mw; x++) {
+          final v = conf[y * mw + x];
+          final i = (y * mw + x) * 4;
+          maskRgba[i] = 255;
+          maskRgba[i + 1] = 255;
+          maskRgba[i + 2] = 255;
+          maskRgba[i + 3] = (v.clamp(0.0, 1.0) * 255).round();
+          if (v > 0.5) {
+            count++;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
       }
-      return _Photo(out, w, h, subject, details);
+      if (count < mw * mh * 0.03) return null;
+      final mask = await _fromRgba(maskRgba, mw, mh);
+      final bx = minX / mw * w, by = minY / mh * h, bw = (maxX - minX) / mw * w, bh = (maxY - minY) / mh * h;
+
+      // Tela nera con le proporzioni del video, oggetto centrato con margine.
+      var cw = math.max(bw * 1.32, bh * 1.04 * a);
+      var chh = cw / a;
+      cw = cw.roundToDouble();
+      chh = chh.roundToDouble();
+      final ox = cw / 2 - (bx + bw / 2), oy = chh / 2 - (by + bh / 2);
+
+      final rec = ui.PictureRecorder();
+      final canvas = Canvas(rec);
+      canvas.drawRect(Rect.fromLTWH(0, 0, cw, chh), Paint()..color = Colors.black);
+      final imgRect = Rect.fromLTWH(ox, oy, w.toDouble(), h.toDouble());
+      canvas.saveLayer(imgRect, Paint());
+      canvas.drawImageRect(graded, Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble()), imgRect,
+          Paint()..filterQuality = FilterQuality.high);
+      canvas.drawImageRect(mask, Rect.fromLTWH(0, 0, mw.toDouble(), mh.toDouble()), imgRect,
+          Paint()
+            ..blendMode = BlendMode.dstIn
+            ..filterQuality = FilterQuality.high);
+      // Sfuma il cinturino verso i bordi della foto (niente tagli netti).
+      final fade = h * 0.1;
+      canvas.drawRect(
+        imgRect,
+        Paint()
+          ..blendMode = BlendMode.dstIn
+          ..shader = ui.Gradient.linear(
+            Offset(0, oy),
+            Offset(0, oy + h),
+            const [Color(0x00000000), Color(0xFF000000), Color(0xFF000000), Color(0x00000000)],
+            [0, fade / h, 1 - fade / h, 1],
+          ),
+      );
+      canvas.restore();
+      final outImg = await rec.endRecording().toImage(cw.toInt(), chh.toInt());
+      await _savePng(outImg, out);
+      outImg.dispose();
+      graded.dispose();
+      mask.dispose();
+      return _Still(out, cw.toInt(), chh.toInt(), ShotRole.hero, isCutout: true);
     } catch (_) {
       return null;
     }
   }
 
-  // ───────────────────────── Regia ─────────────────────────
-
-  Project _direct(List<_Photo> photos, SpotOptions o, (String, int, int) glint) {
-    final project = Project(aspect: o.aspect)
-      ..background = CanvasBackground.black
-      ..fps = 30;
-    final a = project.aspect.width / project.aspect.height; // proporzioni del video
-    final style = o.style;
-    final macroDur = switch (style) { SpotStyle.sport => 1.4, SpotStyle.luxury => 2.2, SpotStyle.minimal => 2.0 };
-    final wideDur = switch (style) { SpotStyle.sport => 1.8, SpotStyle.luxury => 2.8, SpotStyle.minimal => 2.5 };
-    final rot = switch (style) { SpotStyle.sport => 3.0, SpotStyle.luxury => 1.5, SpotStyle.minimal => 0.0 };
-    final transitions = switch (style) {
-      SpotStyle.luxury => [TransitionType.fade, TransitionType.fadeBlack],
-      SpotStyle.sport => [TransitionType.zoom, TransitionType.slideLeft, TransitionType.fadeWhite],
-      SpotStyle.minimal => [TransitionType.fade],
-    };
-    final trDur = Duration(milliseconds: style == SpotStyle.sport ? 300 : 550);
-    final adjust = switch (style) {
-      SpotStyle.luxury => const ColorAdjust(contrast: 1.15, saturation: 1.05, warmth: 0.25, sharpen: 0.5),
-      SpotStyle.sport => const ColorAdjust(contrast: 1.25, saturation: 1.2, sharpen: 0.6),
-      SpotStyle.minimal => const ColorAdjust(brightness: 0.04, contrast: 1.05, saturation: 0.95, sharpen: 0.4),
-    };
-
-    // Pianificazione: apertura, macro sui dettagli di ogni foto, chiusura.
-    final shots = <(_Photo, KenBurns, double, bool)>[]; // foto, movimento, durata, riflesso
-    final budget = o.seconds.toDouble();
-    shots.add((photos[0], _wide(photos[0], a, rot, pushIn: true), wideDur, true));
-    var used = wideDur + wideDur + 0.5; // apertura + chiusura
-    var round = 0;
-    var added = true;
-    while (added && used < budget) {
-      added = false;
-      for (final ph in photos) {
-        final hasDetail = round < ph.details.length;
-        final dur = hasDetail ? macroDur : wideDur;
-        if (used + dur > budget) break;
-        if (hasDetail) {
-          shots.add((ph, _macro(ph, ph.details[round], a, rot, flip: shots.length.isOdd), macroDur, false));
-        } else if (round == ph.details.length && !identical(ph, photos[0])) {
-          shots.add((ph, _wide(ph, a, rot, pushIn: shots.length.isEven), wideDur, true));
-        } else {
-          continue;
-        }
-        used += dur;
-        added = true;
-      }
-      round++;
-      if (round > 6) break;
-    }
-    // Chiusura: dal dettaglio migliore all'oggetto intero.
-    final hero = photos[0];
-    shots.add((hero, _reveal(hero, a, rot), wideDur + 0.5, true));
-
-    // Clip.
-    for (var i = 0; i < shots.length; i++) {
-      final (ph, kb, dur, _) = shots[i];
-      final d = Duration(milliseconds: (dur * 1000).round());
-      project.clips.add(VideoClip.image(ph.path, duration: d)
-        ..width = ph.w
-        ..height = ph.h
-        ..motion = kb
-        ..effect = style == SpotStyle.minimal ? ClipEffect.none : ClipEffect.vignette
-        ..adjust = adjust
-        ..transition = i == shots.length - 1 ? TransitionType.none : transitions[i % transitions.length]
-        ..transitionDuration = trDur);
-    }
-    // Inizi reali sulla timeline (le transizioni sovrappongono le clip).
-    final starts = [for (var i = 0; i < shots.length; i++) project.startOf(i)];
-    final total = project.totalDuration;
-
-    // Riflessi di luce sulle inquadrature intere.
-    final (gPath, gw, gh) = glint;
-    for (var i = 0; i < shots.length; i++) {
-      if (!shots[i].$4) continue;
-      final s = starts[i] + const Duration(milliseconds: 500);
-      const len = Duration(milliseconds: 1100);
-      if (s + len > total) continue;
-      project.pips.add(PipLayer(
-        path: gPath,
-        isImage: true,
-        sourceDuration: const Duration(minutes: 10),
-        width: gw,
-        height: gh,
-        hasAudio: false,
-        start: s,
-        trimEnd: len,
-        cx: -0.35,
-        toCx: 1.35,
-        cy: 0.5,
-        toCy: 0.5,
-        scale: 0.8,
-        opacity: style == SpotStyle.minimal ? 0.35 : 0.5,
-      ));
-    }
-
-    // Testi.
-    const gold = Color(0xFFE6C77A);
-    final titleColor = switch (style) { SpotStyle.luxury => gold, SpotStyle.sport => Colors.white, SpotStyle.minimal => Colors.white };
-    String up(String s) => style == SpotStyle.minimal ? s : s.toUpperCase();
-    final introEnd = starts.length > 1 ? starts[1] : total;
-    if (o.title.trim().isNotEmpty) {
-      project.overlays.add(VideoOverlay(
-        kind: OverlayKind.text,
-        text: up(o.title.trim()),
-        start: const Duration(milliseconds: 500),
-        end: introEnd,
-        color: titleColor,
-        fontSize: style == SpotStyle.sport ? 110 : 92,
-        outline: style == SpotStyle.sport,
-        box: style == SpotStyle.minimal,
-        boxColor: const Color(0x66000000),
-        cy: 0.8,
-        animIn: style == SpotStyle.sport ? AnimIn.slideLeft : AnimIn.slideUp,
-        animOut: AnimOut.fade,
-      ));
-    }
-    if (o.subtitle.trim().isNotEmpty) {
-      project.overlays.add(VideoOverlay(
-        kind: OverlayKind.text,
-        text: o.subtitle.trim(),
-        start: const Duration(milliseconds: 900),
-        end: introEnd,
-        color: Colors.white,
-        fontSize: 52,
-        outline: false,
-        cy: 0.87,
-        animIn: AnimIn.fade,
-        animOut: AnimOut.fade,
-      ));
-    }
-    final outroStart = starts.last + const Duration(milliseconds: 800);
-    final finalText = [o.title.trim(), o.endText.trim()].where((s) => s.isNotEmpty).join('\n');
-    if (finalText.isNotEmpty && outroStart < total) {
-      project.overlays.add(VideoOverlay(
-        kind: OverlayKind.text,
-        text: up(finalText),
-        start: outroStart,
-        end: total,
-        color: titleColor,
-        fontSize: 84,
-        outline: style != SpotStyle.minimal,
-        box: style == SpotStyle.minimal,
-        boxColor: const Color(0x66000000),
-        cy: 0.8,
-        animIn: AnimIn.fade,
-        animOut: AnimOut.none,
-      ));
-    }
-    return project;
-  }
-
-  /// Inquadratura intera dell'oggetto, con lieve avvicinamento.
-  KenBurns _wide(_Photo ph, double a, double rot, {required bool pushIn}) {
-    final s = ph.subject;
-    final wide = math.max(s.width * 1.35, s.height * 1.35 * a);
-    final r1 = _fit(ph, s.center, wide, a);
-    final r2 = _fit(ph, s.center, wide * 0.84, a);
-    return _make(ph, pushIn ? r1 : r2, pushIn ? r2 : r1, a, pushIn ? -rot / 2 : rot / 2, pushIn ? rot / 2 : -rot / 2);
-  }
-
-  /// Macro su un dettaglio, con carrellata laterale.
-  KenBurns _macro(_Photo ph, (Offset, double) d, double a, double rot, {required bool flip}) {
-    final (c, size) = d;
-    // Non ingrandire oltre ~3 volte i pixel reali (diventerebbe sgranato).
-    final minW = math.max(ph.w * 0.12, 1080 / 3);
-    final base = math.max(size * 1.6, minW);
-    final shift = base * 0.14 * (flip ? -1 : 1);
-    final r1 = _fit(ph, c.translate(-shift, 0), base * 1.12, a);
-    final r2 = _fit(ph, c.translate(shift, 0), base, a);
-    return _make(ph, r1, r2, a, flip ? rot : -rot, flip ? -rot : rot);
-  }
-
-  /// Dal dettaglio migliore all'oggetto intero (chiusura).
-  KenBurns _reveal(_Photo ph, double a, double rot) {
-    final s = ph.subject;
-    final wide = math.max(s.width * 1.4, s.height * 1.4 * a);
-    final d = ph.details.isNotEmpty ? ph.details.first : (s.center, s.shortestSide * 0.3);
-    final minW = math.max(ph.w * 0.12, 1080 / 3);
-    final r1 = _fit(ph, d.$1, math.max(d.$2 * 1.8, minW), a);
-    final r2 = _fit(ph, s.center, wide, a);
-    return _make(ph, r1, r2, a, rot, 0);
-  }
-
-  /// Rettangolo con le proporzioni del video, centrato e tenuto dentro la foto.
-  Rect _fit(_Photo ph, Offset c, double width, double a) {
-    final w = math.min(width, math.min(ph.w.toDouble(), ph.h * a));
-    final h = w / a;
-    final x = (c.dx - w / 2).clamp(0.0, ph.w - w);
-    final y = (c.dy - h / 2).clamp(0.0, ph.h - h);
-    return Rect.fromLTWH(x, y, w, h);
-  }
-
-  /// Riquadro comune alle due inquadrature + coordinate relative.
-  KenBurns _make(_Photo ph, Rect r1, Rect r2, double a, double rotFrom, double rotTo) {
-    final u = r1.expandToInclude(r2);
-    final box = _fit(ph, u.center, math.max(u.width, u.height * a), a);
-    ShotRect rel(Rect r) {
-      final size = (r.width / box.width).clamp(0.05, 1.0);
-      final x = ((r.left - box.left) / box.width).clamp(0.0, 1 - size);
-      final y = ((r.top - box.top) / box.height).clamp(0.0, 1 - size);
-      return ShotRect(x, y, size);
-    }
-
-    return KenBurns(
-      px: box.left / ph.w,
-      py: box.top / ph.h,
-      pw: box.width / ph.w,
-      ph: box.height / ph.h,
-      from: rel(r1),
-      to: rel(r2),
-      rotFrom: rotFrom,
-      rotTo: rotTo,
-    );
-  }
-
-  /// Fascia di luce diagonale trasparente (il "riflesso" che scorre).
-  Future<(String, int, int)> _renderGlint(String path) async {
-    const w = 600, h = 1800;
+  static Future<String> _solid(String path) async {
     final rec = ui.PictureRecorder();
-    final canvas = Canvas(rec);
-    canvas.translate(w / 2, h / 2);
-    canvas.rotate(0.35);
-    const band = Rect.fromLTWH(-140, -1200, 280, 2400);
-    canvas.drawRect(
-      band,
-      Paint()
-        ..shader = const LinearGradient(colors: [
-          Color(0x00FFFFFF),
-          Color(0x40FFFFFF),
-          Color(0xCCFFFFFF),
-          Color(0x40FFFFFF),
-          Color(0x00FFFFFF),
-        ], stops: [0, 0.35, 0.5, 0.65, 1])
-            .createShader(band),
-    );
-    final img = await rec.endRecording().toImage(w, h);
-    final png = await img.toByteData(format: ui.ImageByteFormat.png);
+    Canvas(rec).drawRect(const Rect.fromLTWH(0, 0, 16, 16), Paint()..color = Colors.black);
+    final img = await rec.endRecording().toImage(16, 16);
+    await _savePng(img, path);
     img.dispose();
-    await File(path).writeAsBytes(png!.buffer.asUint8List(), flush: true);
-    return (path, w, h);
+    return path;
   }
 }
 
-/// Analisi della foto ridotta (RGBA): restituisce
-/// [sx, sy, sw, sh, d1x, d1y, d1size, d2x, ...] in pixel della foto ridotta.
-/// Soggetto = zona diversa dallo sfondo (colore dei bordi) o ricca di bordi;
-/// dettagli = finestre con più contrasto locale (lancette, indici, logo...).
-List<double> analyzePhoto(Uint8List rgba, int w, int h) {
+/// Correzione colore "da pubblicità" + nitidezza, su pixel RGBA.
+/// [lowKey]: curva che porta al nero i toni medio-scuri (sfondo) lasciando
+/// brillare i riflessi; altrimenti una curva neutra più contrastata.
+Uint8List gradePixels(Uint8List src, int w, int h, {required bool lowKey}) {
+  final List<(double, double)> pts = lowKey
+      ? const [(0.0, 0.0), (0.30, 0.02), (0.5, 0.16), (0.72, 0.55), (0.9, 0.9), (1.0, 1.0)]
+      : const [(0.0, 0.0), (0.15, 0.06), (0.5, 0.47), (0.85, 0.9), (1.0, 1.0)];
+  final lut = Uint8List(256);
+  for (var i = 0; i < 256; i++) {
+    final x = i / 255;
+    var y = x;
+    for (var k = 0; k + 1 < pts.length; k++) {
+      final (x0, y0) = pts[k];
+      final (x1, y1) = pts[k + 1];
+      if (x >= x0 && x <= x1) {
+        y = y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+        break;
+      }
+    }
+    lut[i] = (y * 255).round().clamp(0, 255);
+  }
+  final sat = lowKey ? 0.85 : 0.92;
+  final amount = lowKey ? 0.6 : 0.5;
+
+  // Sfocatura a scatola (2 passate) per la maschera di contrasto.
   final n = w * h;
-  final gray = Float64List(n);
+  final blur = Float32List(n * 3), tmp = Float32List(n * 3);
   for (var i = 0; i < n; i++) {
-    gray[i] = 0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2];
+    blur[i * 3] = src[i * 4].toDouble();
+    blur[i * 3 + 1] = src[i * 4 + 1].toDouble();
+    blur[i * 3 + 2] = src[i * 4 + 2].toDouble();
   }
-  // Colore dello sfondo: media dei bordi.
-  var br = 0.0, bg = 0.0, bb = 0.0, bc = 0;
-  for (var y = 0; y < h; y++) {
-    for (var x = 0; x < w; x++) {
-      if (x > 3 && x < w - 4 && y > 3 && y < h - 4) continue;
-      final i = (y * w + x) * 4;
-      br += rgba[i];
-      bg += rgba[i + 1];
-      bb += rgba[i + 2];
-      bc++;
+  const r = 2;
+  for (var pass = 0; pass < 2; pass++) {
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var a = 0.0, b = 0.0, c = 0.0, cnt = 0;
+        for (var d = -r; d <= r; d++) {
+          final xx = (x + d).clamp(0, w - 1);
+          final j = (y * w + xx) * 3;
+          a += blur[j];
+          b += blur[j + 1];
+          c += blur[j + 2];
+          cnt++;
+        }
+        final o = (y * w + x) * 3;
+        tmp[o] = a / cnt;
+        tmp[o + 1] = b / cnt;
+        tmp[o + 2] = c / cnt;
+      }
     }
-  }
-  br /= bc;
-  bg /= bc;
-  bb /= bc;
-
-  // Gradiente (Sobel).
-  final grad = Float64List(n);
-  var gmax = 1.0;
-  for (var y = 1; y < h - 1; y++) {
-    for (var x = 1; x < w - 1; x++) {
-      double g(int dx, int dy) => gray[(y + dy) * w + x + dx];
-      final gx = -g(-1, -1) - 2 * g(-1, 0) - g(-1, 1) + g(1, -1) + 2 * g(1, 0) + g(1, 1);
-      final gy = -g(-1, -1) - 2 * g(0, -1) - g(1, -1) + g(-1, 1) + 2 * g(0, 1) + g(1, 1);
-      final m = math.sqrt(gx * gx + gy * gy);
-      grad[y * w + x] = m;
-      if (m > gmax) gmax = m;
-    }
-  }
-
-  // Soggetto.
-  final xs = <int>[], ys = <int>[];
-  for (var y = 0; y < h; y++) {
-    for (var x = 0; x < w; x++) {
-      final i = y * w + x;
-      final dr = rgba[i * 4] - br, dg = rgba[i * 4 + 1] - bg, db = rgba[i * 4 + 2] - bb;
-      final diff = math.sqrt(dr * dr + dg * dg + db * db) / 441;
-      if (diff > 0.16 || grad[i] / gmax > 0.3) {
-        xs.add(x);
-        ys.add(y);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var a = 0.0, b = 0.0, c = 0.0, cnt = 0;
+        for (var d = -r; d <= r; d++) {
+          final yy = (y + d).clamp(0, h - 1);
+          final j = (yy * w + x) * 3;
+          a += tmp[j];
+          b += tmp[j + 1];
+          c += tmp[j + 2];
+          cnt++;
+        }
+        final o = (y * w + x) * 3;
+        blur[o] = a / cnt;
+        blur[o + 1] = b / cnt;
+        blur[o + 2] = c / cnt;
       }
     }
   }
-  double sx = 0, sy = 0, sw = w.toDouble(), sh = h.toDouble();
-  if (xs.length > n * 0.02) {
-    xs.sort();
-    ys.sort();
-    double pct(List<int> v, double q) => v[(q * (v.length - 1)).round()].toDouble();
-    sx = pct(xs, 0.03);
-    final ex = pct(xs, 0.97);
-    sy = pct(ys, 0.03);
-    final ey = pct(ys, 0.97);
-    sw = math.max(8, ex - sx);
-    sh = math.max(8, ey - sy);
-  }
 
-  // Immagine integrale del gradiente.
-  final integ = Float64List((w + 1) * (h + 1));
-  for (var y = 0; y < h; y++) {
-    var row = 0.0;
-    for (var x = 0; x < w; x++) {
-      row += grad[y * w + x];
-      integ[(y + 1) * (w + 1) + x + 1] = integ[y * (w + 1) + x + 1] + row;
-    }
-  }
-  double sum(int x0, int y0, int x1, int y1) =>
-      integ[y1 * (w + 1) + x1] - integ[y0 * (w + 1) + x1] - integ[y1 * (w + 1) + x0] + integ[y0 * (w + 1) + x0];
-
-  // Dettagli: finestre quadrate dentro il soggetto, con soppressione dei vicini.
-  final out = <double>[sx, sy, sw, sh];
-  final cands = <(double, double, double, double)>[]; // punteggio, cx, cy, lato
-  for (final f in [0.22, 0.3]) {
-    final win = math.max(8, (math.min(sw, sh) * f).round());
-    final step = math.max(2, win ~/ 5);
-    for (var y = sy.round(); y + win <= (sy + sh).round() && y + win < h; y += step) {
-      for (var x = sx.round(); x + win <= (sx + sw).round() && x + win < w; x += step) {
-        final s = sum(x, y, x + win, y + win) / (win * win);
-        cands.add((s, x + win / 2, y + win / 2, win.toDouble()));
-      }
-    }
-  }
-  cands.sort((a, b) => b.$1.compareTo(a.$1));
-  final picked = <(double, double, double, double)>[];
-  for (final c in cands) {
-    if (picked.length >= 3) break;
-    final far = picked.every((p) {
-      final d = math.sqrt(math.pow(p.$2 - c.$2, 2) + math.pow(p.$3 - c.$3, 2));
-      return d > math.max(p.$4, c.$4) * 0.9;
-    });
-    if (far) picked.add(c);
-  }
-  for (final c in picked) {
-    out.addAll([c.$2, c.$3, c.$4]);
+  final out = Uint8List(n * 4);
+  for (var i = 0; i < n; i++) {
+    final r0 = src[i * 4].toDouble(), g0 = src[i * 4 + 1].toDouble(), b0 = src[i * 4 + 2].toDouble();
+    // nitidezza
+    var rr = r0 + (r0 - blur[i * 3]) * amount;
+    var gg = g0 + (g0 - blur[i * 3 + 1]) * amount;
+    var bb = b0 + (b0 - blur[i * 3 + 2]) * amount;
+    // desaturazione leggera
+    final l = 0.299 * rr + 0.587 * gg + 0.114 * bb;
+    rr = rr * sat + l * (1 - sat);
+    gg = gg * sat + l * (1 - sat);
+    bb = bb * sat + l * (1 - sat);
+    out[i * 4] = lut[rr.round().clamp(0, 255)];
+    out[i * 4 + 1] = lut[gg.round().clamp(0, 255)];
+    out[i * 4 + 2] = lut[bb.round().clamp(0, 255)];
+    out[i * 4 + 3] = 255;
   }
   return out;
+}
+
+/// Colonna sonora sintetica (WAV 44,1 kHz stereo): ticchettio nella parte
+/// macro, colpi sui tagli, salita, silenzio, colpo basso sulla rivelazione,
+/// scintillio, colpo finale sul marchio. Funzione pura (testabile).
+void writeSpotSoundtrack(String path, double total, List<double> macroCuts, double blackCut, double heroCut,
+    double endCut) {
+  const sr = 44100;
+  final n = (total * sr).round();
+  final out = Float64List(n);
+  final rng = math.Random(3);
+  double noise() => rng.nextDouble() * 2 - 1;
+
+  void add(List<double> sig, double at, double gain) {
+    final i = (at * sr).round();
+    for (var k = 0; k < sig.length && i + k < n; k++) {
+      if (i + k >= 0) out[i + k] += sig[k] * gain;
+    }
+  }
+
+  List<double> tick(double f, double dec, double dur) => [
+        for (var k = 0; k < (dur * sr).round(); k++)
+          (math.sin(2 * math.pi * f * k / sr) * 0.6 + noise() * 0.4) * math.exp(-(k / sr) / dec),
+      ];
+  List<double> boom(double f0, double dur) {
+    final s = <double>[];
+    var ph = 0.0;
+    for (var k = 0; k < (dur * sr).round(); k++) {
+      final t = k / sr;
+      final f = f0 * (1 + 0.6 * math.exp(-t / 0.08));
+      ph += 2 * math.pi * f / sr;
+      s.add(math.sin(ph) * math.exp(-t / 0.9) + 0.25 * noise() * math.exp(-t / 0.03));
+    }
+    return s;
+  }
+
+  List<double> shimmer(double dur) => [
+        for (var k = 0; k < (dur * sr).round(); k++)
+          () {
+            final t = k / sr;
+            final v = math.sin(2 * math.pi * 1760 * t) * 0.3 +
+                math.sin(2 * math.pi * 2637 * t + 1) * 0.2 +
+                math.sin(2 * math.pi * 3520 * t + 2) * 0.12 +
+                math.sin(2 * math.pi * 1318 * t + 3) * 0.25;
+            return v * math.min(1.0, t / 0.4) * math.exp(-t / 1.6);
+          }(),
+      ];
+
+  // Tappeto scuro.
+  for (var k = 0; k < n; k++) {
+    final t = k / sr;
+    final pad = (math.sin(2 * math.pi * 55 * t) +
+            0.6 * math.sin(2 * math.pi * 82.4 * t) +
+            0.3 * math.sin(2 * math.pi * 110.2 * t)) *
+        (0.6 + 0.4 * math.sin(2 * math.pi * 0.25 * t));
+    final env = math.min(1.0, t / 2.0) * math.min(1.0, (total - t) / 1.5);
+    out[k] += pad * env * 0.08;
+  }
+  // Ticchettio.
+  for (var t = 0.0; t < blackCut - 0.05; t += 0.5) {
+    add(tick(3200, 0.012, 0.05), t, (t * 2).round() % 2 == 0 ? 0.35 : 0.2);
+  }
+  for (final c in macroCuts) {
+    add(tick(2400, 0.02, 0.08), c, 0.7);
+  }
+  // Salita prima della rivelazione, poi quasi silenzio.
+  final riseStart = macroCuts.isEmpty ? blackCut - 0.7 : macroCuts.last;
+  final riseLen = ((blackCut - riseStart) * sr).round();
+  for (var k = 0; k < riseLen; k++) {
+    final i = (riseStart * sr).round() + k;
+    if (i >= 0 && i < n) out[i] += noise() * math.pow(k / math.max(1, riseLen), 2.5) * 0.25;
+  }
+  for (var k = (blackCut * sr).round(); k < (heroCut * sr).round() && k < n; k++) {
+    out[k] *= 0.15;
+  }
+  add(boom(48, 2.5), heroCut, 0.9);
+  add(shimmer(3.5), heroCut + 0.1, 0.25);
+  add(boom(40, 3.0), endCut, 0.7);
+  add(shimmer(3.0), endCut + 0.2, 0.3);
+
+  // Saturazione morbida, normalizzazione, dissolvenza finale.
+  var peak = 1e-9;
+  for (var k = 0; k < n; k++) {
+    out[k] = _tanh(out[k] * 1.2);
+    if (out[k].abs() > peak) peak = out[k].abs();
+  }
+  final bytes = BytesBuilder();
+  final header = ByteData(44);
+  final dataLen = n * 4;
+  void str(int o, String s) {
+    for (var i = 0; i < s.length; i++) {
+      header.setUint8(o + i, s.codeUnitAt(i));
+    }
+  }
+
+  str(0, 'RIFF');
+  header.setUint32(4, 36 + dataLen, Endian.little);
+  str(8, 'WAVE');
+  str(12, 'fmt ');
+  header.setUint32(16, 16, Endian.little);
+  header.setUint16(20, 1, Endian.little);
+  header.setUint16(22, 2, Endian.little);
+  header.setUint32(24, sr, Endian.little);
+  header.setUint32(28, sr * 4, Endian.little);
+  header.setUint16(32, 4, Endian.little);
+  header.setUint16(34, 16, Endian.little);
+  str(36, 'data');
+  header.setUint32(40, dataLen, Endian.little);
+  bytes.add(header.buffer.asUint8List());
+  final pcm = ByteData(dataLen);
+  final delay = (0.012 * sr).round();
+  for (var k = 0; k < n; k++) {
+    final fade = math.min(1.0, (total - k / sr) / 0.8);
+    final l = out[k] / peak * 0.85 * fade;
+    final r = (k >= delay ? out[k - delay] : 0.0) / peak * 0.85 * 0.9 * fade;
+    pcm.setInt16(k * 4, (l * 32767).round().clamp(-32768, 32767), Endian.little);
+    pcm.setInt16(k * 4 + 2, (r * 32767).round().clamp(-32768, 32767), Endian.little);
+  }
+  bytes.add(pcm.buffer.asUint8List());
+  File(path).writeAsBytesSync(bytes.toBytes(), flush: true);
+}
+
+double _tanh(double x) {
+  final e = math.exp(2 * x);
+  return (e - 1) / (e + 1);
 }

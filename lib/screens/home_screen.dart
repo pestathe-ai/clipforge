@@ -96,7 +96,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final res = await FilePicker.platform.pickFiles(type: FileType.image, allowMultiple: true);
     final paths = res?.files.map((f) => f.path).whereType<String>().toList() ?? const <String>[];
     if (paths.isEmpty || !mounted) return;
-    final options = await showSpotSheet(context, paths.length);
+    if (paths.length > 8) paths.removeRange(8, paths.length);
+    final options = await showSpotSheet(context, paths);
     if (options == null || !mounted) return;
     final phase = ValueNotifier<(String, double)>(('Preparo…', 0));
     showDialog<void>(
@@ -115,7 +116,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
     try {
-      final project = await SpotService().build(paths, options, onProgress: (t, v) => phase.value = (t, v));
+      final project = await SpotService().build(options, onProgress: (t, v) => phase.value = (t, v));
       if (!mounted) return;
       Navigator.of(context).pop();
       await _open(project, pick: false);
@@ -217,10 +218,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                     Icon(Icons.watch_rounded, size: 24),
                     SizedBox(width: 10),
-                    Text('Spot rapido', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                    Text('Spot prodotto', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
                     SizedBox(width: 8),
                     Flexible(
-                      child: Text('senza IA, gratis',
+                      child: Text('gratis, dalle tue foto',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(fontSize: 12, color: Colors.white54)),

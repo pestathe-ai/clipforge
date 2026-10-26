@@ -1385,6 +1385,20 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
           child,
           if (o > 0) ColoredBox(color: Colors.white.withValues(alpha: o)),
         ]);
+      case ClipEffect.spotlight:
+      case ClipEffect.glint:
+        return Stack(fit: StackFit.expand, children: [
+          child,
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: RadialGradient(
+                colors: [Colors.transparent, Color(0xE6000000)],
+                stops: [0.45, 1.0],
+                radius: 0.85,
+              ),
+            ),
+          ),
+        ]);
     }
   }
 

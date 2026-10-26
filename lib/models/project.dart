@@ -88,7 +88,9 @@ enum ClipEffect {
   vignette('Vignetta', Icons.vignette_rounded),
   mirror('Specchio', Icons.flip_rounded),
   blur('Sfocato', Icons.blur_on_rounded),
-  flash('Flash iniziale', Icons.flash_on_rounded);
+  flash('Flash iniziale', Icons.flash_on_rounded),
+  spotlight('Luce puntata', Icons.highlight_rounded),
+  glint('Riflesso', Icons.auto_awesome_rounded);
 
   const ClipEffect(this.label, this.icon);
   final String label;
@@ -392,11 +394,15 @@ class KenBurns {
     required this.to,
     this.rotFrom = 0,
     this.rotTo = 0,
+    this.linear = false,
   });
 
   final double px, py, pw, ph;
   final ShotRect from, to;
   final double rotFrom, rotTo;
+
+  /// Movimento a velocità costante (stile carrello di ripresa) invece che morbido.
+  final bool linear;
 
   bool get rotates => rotFrom.abs() > 0.01 || rotTo.abs() > 0.01;
 
@@ -406,7 +412,7 @@ class KenBurns {
     return c * c * (3 - 2 * c);
   }
 
-  ShotRect at(double p) => from.lerp(to, ease(p));
+  ShotRect at(double p) => from.lerp(to, linear ? p.clamp(0.0, 1.0) : ease(p));
   double rotationAt(double p) => rotFrom + (rotTo - rotFrom) * p.clamp(0.0, 1.0);
 
   Map<String, dynamic> toJson() => {
@@ -414,6 +420,7 @@ class KenBurns {
         'from': from.toJson(),
         'to': to.toJson(),
         'rot': [rotFrom, rotTo],
+        'linear': linear,
       };
 
   factory KenBurns.fromJson(Map<String, dynamic> j) {
@@ -428,6 +435,7 @@ class KenBurns {
       to: ShotRect.fromJson(j['to'] as List),
       rotFrom: r[0],
       rotTo: r[1],
+      linear: (j['linear'] as bool?) ?? false,
     );
   }
 }

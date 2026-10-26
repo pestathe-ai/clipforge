@@ -20,6 +20,12 @@ if ! grep -q RECORD_AUDIO "$MANIFEST"; then
   rm -f "$MANIFEST.bak"
 fi
 
+# Android: modello di ritaglio oggetti di ML Kit (scaricato da Google Play Services).
+if ! grep -q subject_segment "$MANIFEST"; then
+  sed -i.bak 's#</application>#    <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="subject_segment" />\n    </application>#' "$MANIFEST"
+  rm -f "$MANIFEST.bak"
+fi
+
 # iOS: target minimo 15.6 (ML Kit) e descrizioni dei permessi foto.
 PLIST=ios/Runner/Info.plist
 add_key() {

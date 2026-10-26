@@ -53,6 +53,10 @@ Flutter e usa FFmpeg per l'esportazione.
 
 - **Spot IA con Higgsfield**: le riprese vengono generate dall'IA a partire dalle tue foto, con il modello Kling 3.0 image-to-video tramite l'API di Higgsfield. Per ogni foto indichi cosa mostra (intero, quadrante, logo, corona, fondello, cinturino, scatola). L'app scrive i prompt in stile pubblicità di lusso, genera una ripresa per foto, e con una foto sola fa un'unica richiesta a più inquadrature. Poi monta tutto con tagli secchi e il marchio in chiusura. Serve una chiave API di Higgsfield (cloud.higgsfield.ai, pagamento a consumo), da salvare con l'icona a forma di chiave.
 
+### Novità v0.8
+
+- **Spot prodotto gratuito, rifatto in stile pubblicità di lusso**: funziona sul telefono, senza internet e senza costi. Le macro sono in low-key (lo sfondo va al nero e brillano metallo e oro). L'orologio intero viene ritagliato su nero con ML Kit Subject Segmentation (solo Android; il modello si scarica una volta). La camera si muove lenta e a velocità costante, i tagli sono secchi, i riflessi scorrono solo sul metallo e l'orologio emerge dal buio. In chiusura c'è il marchio, e la colonna sonora è generata sui tagli (ticchettio, salita, colpi bassi).
+
 ## Avvio rapido
 
 Ti servono Flutter 3.27 o più recente, Android Studio e/o Xcode (per iOS

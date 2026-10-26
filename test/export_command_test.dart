@@ -226,6 +226,27 @@ void main() {
     expect(JobStatus.parse({'status': 'nsfw'}).state, JobState.nsfw);
   });
 
+  test('spot gratuito: correzione colore, sonoro e riflesso', () {
+    // Low-key: un grigio medio (sfondo) va quasi al nero, il bianco resta.
+    final px = Uint8List.fromList([110, 100, 90, 255, 250, 250, 250, 255]);
+    final g = gradePixels(px, 2, 1, lowKey: true);
+    expect(g[0], lessThan(50));
+    expect(g[4], greaterThan(230));
+
+    final dir = Directory.systemTemp.createTempSync();
+    final wav = '${dir.path}/s.wav';
+    writeSpotSoundtrack(wav, 6, [1.0, 1.75, 2.5], 3.0, 4.0, 5.0);
+    final bytes = File(wav).readAsBytesSync();
+    expect(String.fromCharCodes(bytes.sublist(0, 4)), 'RIFF');
+    expect(bytes.length, 44 + 6 * 44100 * 4);
+
+    final c = VideoClip.image('/f.png', duration: const Duration(seconds: 2))..effect = ClipEffect.glint;
+    final args = ExportCommand(project: Project()..clips.add(c), outputPath: '/o.mp4').build();
+    final graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph, contains('blend=c0_mode=screen'));
+    expect(graph, contains('[ga0][gb0]'));
+  });
+
   test('progetto vuoto lancia un errore', () {
     expect(() => ExportCommand(project: Project(), outputPath: '/o.mp4').build(), throwsStateError);
   });
@@ -258,9 +279,10 @@ void main() {
           p.clips.add(VideoClip.image('$dir/photo.jpg', duration: const Duration(milliseconds: 2200))
             ..width = 800
             ..height = 600
-            ..effect = ClipEffect.vignette
+            ..effect = i == 5 ? ClipEffect.glint : ClipEffect.spotlight
             ..transition = transitions[i]
             ..motion = KenBurns(
+              linear: i == 8,
               px: 0.2, py: 0.0, pw: 0.6, ph: 1.0,
               from: const ShotRect(0.05, 0.05, 0.9),
               to: const ShotRect(0.4, 0.3, 0.35),

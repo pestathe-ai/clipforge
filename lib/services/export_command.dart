@@ -133,7 +133,7 @@ class ExportCommand {
       chain.write(',setsar=1,format=yuv420p');
       if (c.filter.ffmpeg != null) chain.write(',${c.filter.ffmpeg}');
       if (c.adjust.ffmpeg != null) chain.write(',${c.adjust.ffmpeg}');
-      final fx = _effect(c.effect, w, ch, frames, fps);
+      final fx = _effect(c.effect, w, ch, frames, fps, i, dur);
       if (fx != null) chain.write(',$fx');
       chain.write(',settb=AVTB[v$i]');
       f.add(chain.toString());
@@ -428,7 +428,7 @@ class ExportCommand {
     final wk = _even(w * 2), hk = _even(h * 2);
     final n = math.max(1, frames - 1);
     final p = 'clip(on/$n,0,1)';
-    final e = '($p*$p*(3-2*$p))';
+    final e = kb.linear ? p : '($p*$p*(3-2*$p))';
     String lerp(double a, double b) => '(${_d(a)}+(${_d(b - a)})*$e)';
     final z = '1/${lerp(kb.from.size, kb.to.size)}';
     final x = '${lerp(kb.from.x, kb.to.x)}*iw';
@@ -463,10 +463,22 @@ class ExportCommand {
   }
 
   /// Filtro FFmpeg per un effetto, o null.
-  static String? _effect(ClipEffect e, int w, int h, int frames, int fps) {
+  static String? _effect(ClipEffect e, int w, int h, int frames, int fps, int i, double dur) {
     switch (e) {
       case ClipEffect.none:
         return null;
+      case ClipEffect.spotlight:
+        return 'vignette=a=PI/3.2,noise=alls=4:allf=t';
+      case ClipEffect.glint:
+        // Riflesso che scorre solo sulle parti chiare (metallo, vetro):
+        // banda diagonale generata a bassa risoluzione × luminanza, in "screen".
+        final d = dur.toStringAsFixed(3);
+        return "split[ga$i][gb$i];[gb$i]format=gray,curves=all='0/0 0.1/0.12 0.4/0.65 1/1'[gl$i];"
+            "color=c=black:s=270x480:d=$d:r=$fps,format=gray,"
+            "geq=lum='255*exp(-pow(((X-(T/$d)*620+170)*0.9+Y*0.42-100)/34\\,2))',scale=$w:$h[gbd$i];"
+            "[gl$i][gbd$i]blend=all_mode=multiply,lutyuv=y='min(255\\,val*1.8)'[gm$i];"
+            "[ga$i][gm$i]blend=c0_mode=screen:c1_mode=normal:c2_mode=normal:shortest=1,"
+            'vignette=a=PI/3.4,noise=alls=4:allf=t';
       case ClipEffect.zoomIn:
         return "zoompan=z='1+0.18*on/$frames':d=1:"
             "x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':s=${w}x$h:fps=$fps";
