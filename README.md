@@ -45,6 +45,10 @@ Flutter e usa FFmpeg per l'esportazione.
 
 - **Meme video**: scegli "Crea meme" nella schermata iniziale, oppure "Meme" nell'editor. Il video si restringe al centro, e sopra e sotto compaiono due fasce nere o bianche con il testo. Il testo si adatta da solo alla fascia, e puoi regolare l'altezza delle fasce e il formato.
 
+### Novità v0.6
+
+- **Spot prodotto** (stile pubblicità), pensato per gli orologi ma valido per ogni oggetto. Carichi le foto e l'app trova l'oggetto e i suoi dettagli più ricchi (quadrante, lancette, logo, corona). Poi monta da sola un video con zoom macro, carrellate, leggere rotazioni, riflessi di luce che scorrono, colori da pubblicità, transizioni e testi di apertura e chiusura. Ci sono 3 stili (Lusso scuro, Sportivo, Minimal), 3 durate (15, 20 o 30 s) e i formati 9:16, 4:5 e 1:1. Il risultato si modifica come qualsiasi altro progetto.
+
 ## Avvio rapido
 
 Ti servono Flutter 3.27 o più recente, Android Studio e/o Xcode (per iOS
@@ -90,6 +94,7 @@ evita i problemi di escape) e `amix` con la musica.
 - Nell'anteprima il chroma key e gli effetti voce non si vedono e non si sentono: sono applicati al video esportato.
 - La rimozione dello sfondo riconosce le persone, non gli oggetti, e si vede solo nel video esportato. Vale lo stesso per la stabilizzazione.
 - Il tracciamento segue bene oggetti con contrasto e movimento regolare. Con movimenti molto veloci o oggetti che spariscono può perdersi.
+- Lo spot prodotto usa solo i pixel delle tue foto: gli zoom macro sono nitidi quanto lo sono le foto.
 - Mancano ancora rispetto a CapCut: sincronizzazione automatica col ritmo della musica, sintesi vocale (testo in voce), effetti IA di stile e la libreria online di modelli, musica ed effetti.
 
 ## Licenza

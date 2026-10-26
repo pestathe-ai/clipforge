@@ -20,6 +20,7 @@ import '../services/subtitle_service.dart';
 import '../state/history.dart';
 import '../state/layer_players.dart';
 import '../widgets/edit_sheets.dart';
+import '../widgets/ken_burns_view.dart';
 import '../widgets/meme_sheet.dart';
 import '../widgets/subtitle_sheet.dart';
 import '../widgets/timeline.dart';
@@ -1207,7 +1208,9 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
         ),
     };
 
-    Widget frame = Stack(fit: StackFit.expand, children: [bg, fg]);
+    Widget frame = clip.isImage && clip.motion != null
+        ? KenBurnsView(path: clip.path, motion: clip.motion!, progress: (localS / durS).clamp(0.0, 1.0))
+        : Stack(fit: StackFit.expand, children: [bg, fg]);
     if (!clip.adjust.isNeutral) {
       frame = ColorFiltered(colorFilter: ColorFilter.matrix(clip.adjust.matrix), child: frame);
     }

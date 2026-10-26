@@ -1,7 +1,10 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../models/project.dart';
+import '../services/spot_service.dart';
 import '../state/history.dart';
+import '../widgets/spot_sheet.dart';
 import 'editor_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -23,6 +26,42 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _reload() async {
     final p = await ProjectStore.load();
     if (mounted) setState(() => _last = p);
+  }
+
+  Future<void> _createSpot() async {
+    final res = await FilePicker.platform.pickFiles(type: FileType.image, allowMultiple: true);
+    final paths = res?.files.map((f) => f.path).whereType<String>().toList() ?? const <String>[];
+    if (paths.isEmpty || !mounted) return;
+    final options = await showSpotSheet(context, paths.length);
+    if (options == null || !mounted) return;
+    final phase = ValueNotifier<(String, double)>(('Preparo…', 0));
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('Creo lo spot'),
+        content: ValueListenableBuilder<(String, double)>(
+          valueListenable: phase,
+          builder: (_, v, __) => Column(mainAxisSize: MainAxisSize.min, children: [
+            LinearProgressIndicator(value: v.$2),
+            const SizedBox(height: 12),
+            Text(v.$1),
+          ]),
+        ),
+      ),
+    );
+    try {
+      final project = await SpotService().build(paths, options, onProgress: (t, v) => phase.value = (t, v));
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      await _open(project, pick: false);
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Non sono riuscito a creare lo spot: $e')));
+    } finally {
+      phase.dispose();
+    }
   }
 
   Future<void> _open(Project p, {bool pick = true, bool meme = false}) async {
@@ -71,6 +110,30 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
+            const SizedBox(height: 12),
+            Material(
+              color: const Color(0xFF1C1D22),
+              borderRadius: BorderRadius.circular(18),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(18),
+                onTap: _createSpot,
+                child: const SizedBox(
+                  height: 72,
+                  child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    Icon(Icons.watch_rounded, size: 28),
+                    SizedBox(width: 10),
+                    Text('Spot prodotto', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+                    SizedBox(width: 8),
+                    Flexible(
+                      child: Text('da foto, stile pubblicità',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 12, color: Colors.white54)),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
             const SizedBox(height: 12),
             Material(
               color: const Color(0xFF1C1D22),

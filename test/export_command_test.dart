@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:clipforge/models/project.dart';
 import 'package:clipforge/services/export_command.dart';
+import 'package:clipforge/services/spot_service.dart';
+import 'dart:typed_data';
 import 'package:flutter/material.dart' show Color;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -139,6 +141,44 @@ void main() {
     expect(g, contains('pad=1080:1080:0:216:color=white[vmeme]'));
   });
 
+  test('spot: movimento di camera e analisi della foto', () {
+    final c = VideoClip.image('/f.png', duration: const Duration(seconds: 2))
+      ..width = 3000
+      ..height = 2000
+      ..motion = const KenBurns(
+          px: 0.3, py: 0, pw: 0.375, ph: 1,
+          from: ShotRect(0, 0, 1), to: ShotRect(0.3, 0.3, 0.4), rotFrom: -1, rotTo: 1);
+    final args = ExportCommand(project: Project()..clips.add(c), outputPath: '/o.mp4').build();
+    final g = args[args.indexOf('-filter_complex') + 1];
+    expect(g, contains('crop=1125:2000:900:0,scale=2160:3840'));
+    expect(g, contains('zoompan='));
+    expect(g, contains('rotate='));
+    expect(c.motion!.at(0.5).size, closeTo(0.7, 1e-9));
+
+    // Foto finta: sfondo scuro, "orologio" chiaro a destra con tacche.
+    const w = 128, h = 96;
+    final rgba = Uint8List(w * h * 4);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        final i = (y * w + x) * 4;
+        final dx = x - 90, dy = y - 48;
+        final inside = dx * dx + dy * dy < 25 * 25;
+        final tick = inside && (x % 6 == 0);
+        final v = tick ? 20 : (inside ? 220 : 25);
+        rgba[i] = v;
+        rgba[i + 1] = v;
+        rgba[i + 2] = v;
+        rgba[i + 3] = 255;
+      }
+    }
+    final r = analyzePhoto(rgba, w, h);
+    final cx = r[0] + r[2] / 2;
+    expect(cx, closeTo(90, 8));
+    expect(r[2], lessThan(70));
+    expect(r.length, greaterThanOrEqualTo(7)); // almeno un dettaglio
+    expect((r[4] - 90).abs(), lessThan(30));
+  });
+
   test('progetto vuoto lancia un errore', () {
     expect(() => ExportCommand(project: Project(), outputPath: '/o.mp4').build(), throwsStateError);
   });
@@ -164,6 +204,22 @@ void main() {
           p.clips.add(VideoClip.image('$dir/photo.jpg', duration: const Duration(seconds: 2))
             ..transition = transitions[i]
             ..quarterTurns = 1);
+          continue;
+        }
+        if (i == 5 || i == 8) {
+          // Spot prodotto: movimento di camera su foto (con e senza rotazione).
+          p.clips.add(VideoClip.image('$dir/photo.jpg', duration: const Duration(milliseconds: 2200))
+            ..width = 800
+            ..height = 600
+            ..effect = ClipEffect.vignette
+            ..transition = transitions[i]
+            ..motion = KenBurns(
+              px: 0.2, py: 0.0, pw: 0.6, ph: 1.0,
+              from: const ShotRect(0.05, 0.05, 0.9),
+              to: const ShotRect(0.4, 0.3, 0.35),
+              rotFrom: i == 5 ? -2 : 0,
+              rotTo: i == 5 ? 2 : 0,
+            ));
           continue;
         }
         p.clips.add(VideoClip(

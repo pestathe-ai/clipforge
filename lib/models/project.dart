@@ -150,6 +150,7 @@ class VideoClip {
     this.fadeIn = Duration.zero,
     this.fadeOut = Duration.zero,
     this.bgMask,
+    this.motion,
   })  : trimStart = trimStart ?? Duration.zero,
         trimEnd = trimEnd ?? sourceDuration;
 
@@ -218,6 +219,9 @@ class VideoClip {
 
   /// Video maschera (bianco = persona) per la rimozione dello sfondo, o null.
   String? bgMask;
+
+  /// Movimento di camera su una foto (zoom/carrellata/rotazione), o null.
+  KenBurns? motion;
 
   bool get hasCrop => cropZoom > 1.001;
 
@@ -316,6 +320,7 @@ class VideoClip {
         'fadeIn': fadeIn.inMicroseconds,
         'fadeOut': fadeOut.inMicroseconds,
         'bgMask': bgMask,
+        'motion': motion?.toJson(),
       };
 
   factory VideoClip.fromJson(Map<String, dynamic> j) => VideoClip(
@@ -351,7 +356,80 @@ class VideoClip {
         fadeIn: Duration(microseconds: (j['fadeIn'] as int?) ?? 0),
         fadeOut: Duration(microseconds: (j['fadeOut'] as int?) ?? 0),
         bgMask: j['bgMask'] as String?,
+        motion: j['motion'] == null ? null : KenBurns.fromJson(j['motion'] as Map<String, dynamic>),
       );
+}
+
+// ─────────────────────────── Movimento di camera su foto ───────────────────────────
+
+/// Inquadratura dentro il riquadro [KenBurns]: angolo in alto a sinistra
+/// e lato, come frazioni del riquadro (ha le stesse proporzioni del video).
+class ShotRect {
+  const ShotRect(this.x, this.y, this.size);
+  final double x;
+  final double y;
+  final double size;
+
+  ShotRect lerp(ShotRect b, double t) =>
+      ShotRect(x + (b.x - x) * t, y + (b.y - y) * t, size + (b.size - size) * t);
+
+  List<double> toJson() => [x, y, size];
+  factory ShotRect.fromJson(List<dynamic> j) =>
+      ShotRect((j[0] as num).toDouble(), (j[1] as num).toDouble(), (j[2] as num).toDouble());
+}
+
+/// Movimento "pubblicitario" su una foto: si ritaglia il riquadro [px,py,pw,ph]
+/// (frazioni della foto, con le proporzioni del video) e dentro si passa
+/// dall'inquadratura [from] a [to] con andamento morbido, ruotando da
+/// [rotFrom] a [rotTo] gradi.
+class KenBurns {
+  const KenBurns({
+    required this.px,
+    required this.py,
+    required this.pw,
+    required this.ph,
+    required this.from,
+    required this.to,
+    this.rotFrom = 0,
+    this.rotTo = 0,
+  });
+
+  final double px, py, pw, ph;
+  final ShotRect from, to;
+  final double rotFrom, rotTo;
+
+  bool get rotates => rotFrom.abs() > 0.01 || rotTo.abs() > 0.01;
+
+  /// Andamento morbido (smoothstep) per p in 0–1.
+  static double ease(double p) {
+    final c = p.clamp(0.0, 1.0);
+    return c * c * (3 - 2 * c);
+  }
+
+  ShotRect at(double p) => from.lerp(to, ease(p));
+  double rotationAt(double p) => rotFrom + (rotTo - rotFrom) * p.clamp(0.0, 1.0);
+
+  Map<String, dynamic> toJson() => {
+        'p': [px, py, pw, ph],
+        'from': from.toJson(),
+        'to': to.toJson(),
+        'rot': [rotFrom, rotTo],
+      };
+
+  factory KenBurns.fromJson(Map<String, dynamic> j) {
+    final p = (j['p'] as List).map((e) => (e as num).toDouble()).toList();
+    final r = (j['rot'] as List).map((e) => (e as num).toDouble()).toList();
+    return KenBurns(
+      px: p[0],
+      py: p[1],
+      pw: p[2],
+      ph: p[3],
+      from: ShotRect.fromJson(j['from'] as List),
+      to: ShotRect.fromJson(j['to'] as List),
+      rotFrom: r[0],
+      rotTo: r[1],
+    );
+  }
 }
 
 // ─────────────────────────── Curve di velocità ───────────────────────────

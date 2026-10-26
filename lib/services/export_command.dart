@@ -62,7 +62,11 @@ class ExportCommand {
       final hasMask = c.bgMask != null && !c.isImage && c.width > 0 && c.height > 0;
 
       final chain = StringBuffer();
-      if (c.isImage) {
+      final kb = c.isImage && c.width > 0 && c.height > 0 ? c.motion : null;
+      if (kb != null) {
+        args.addAll(['-loop', '1', '-framerate', '$fps', '-t', _n(c.outputDuration), '-i', c.path]);
+        chain.write('[${input++}:v]${_kenBurns(kb, c, w, ch, frames, dur, fps)}');
+      } else if (c.isImage) {
         args.addAll(['-loop', '1', '-framerate', '$fps', '-t', _n(c.outputDuration), '-i', c.path]);
         chain.write('[${input++}:v]fps=$fps,setpts=PTS-STARTPTS');
       } else {
@@ -99,15 +103,19 @@ class ExportCommand {
         f.add('[${input++}:a]atrim=duration=$d,asetpts=PTS-STARTPTS,$_audioFormat[a$i]');
       }
 
-      final turn = _transpose(c.quarterTurns);
+      final turn = kb != null ? null : _transpose(c.quarterTurns);
       if (turn != null) chain.write(',$turn');
-      if (c.hasCrop) {
+      if (kb != null) {
+        // Già alla dimensione giusta: niente adattamento né sfondo.
+      } else if (c.hasCrop) {
         final z = c.cropZoom.toStringAsFixed(4);
         chain.write(",crop=w='trunc(iw/$z/2)*2':h='trunc(ih/$z/2)*2'"
             ":x='(iw-ow)*${(0.5 + c.cropX / 2).toStringAsFixed(4)}'"
             ":y='(ih-oh)*${(0.5 + c.cropY / 2).toStringAsFixed(4)}'");
       }
-      if (p.background == CanvasBackground.blur || hasMask) {
+      if (kb != null) {
+        // vedi sopra
+      } else if (p.background == CanvasBackground.blur || hasMask) {
         final bg = p.background == CanvasBackground.blur
             ? 'boxblur=30:3'
             : 'drawbox=c=${p.background == CanvasBackground.white ? 'white' : 'black'}:t=fill';
@@ -410,6 +418,30 @@ class ExportCommand {
   }
 
   static int _even(num v) => math.max(2, (v / 2).round() * 2);
+
+  /// Movimento di camera su una foto: ritaglio del riquadro, ingrandimento
+  /// di lavoro (per un movimento fluido), zoompan con andamento morbido e
+  /// rotazione facoltativa (con margine per non mostrare gli angoli).
+  static String _kenBurns(KenBurns kb, VideoClip c, int w, int h, int frames, double dur, int fps) {
+    final cx = (kb.px * c.width).round(), cy = (kb.py * c.height).round();
+    final cw = math.max(2, (kb.pw * c.width).round()), chh = math.max(2, (kb.ph * c.height).round());
+    final wk = _even(w * 2), hk = _even(h * 2);
+    final n = math.max(1, frames - 1);
+    final p = 'clip(on/$n,0,1)';
+    final e = '($p*$p*(3-2*$p))';
+    String lerp(double a, double b) => '(${_d(a)}+(${_d(b - a)})*$e)';
+    final z = '1/${lerp(kb.from.size, kb.to.size)}';
+    final x = '${lerp(kb.from.x, kb.to.x)}*iw';
+    final y = '${lerp(kb.from.y, kb.to.y)}*ih';
+    final ow = kb.rotates ? _even(w * 1.12) : w, oh = kb.rotates ? _even(h * 1.12) : h;
+    final b = StringBuffer('crop=$cw:$chh:$cx:$cy,scale=$wk:$hk,setsar=1,'
+        "zoompan=z='$z':x='$x':y='$y':d=1:s=${ow}x$oh:fps=$fps");
+    if (kb.rotates) {
+      b.write(",rotate=a='(${_d(kb.rotFrom)}+(${_d(kb.rotTo - kb.rotFrom)})*clip(t/${dur.toStringAsFixed(3)},0,1))*PI/180'"
+          ':ow=$w:oh=$h:c=black');
+    }
+    return b.toString();
+  }
 
   static String? _transpose(int quarterTurns) {
     switch (quarterTurns % 4) {

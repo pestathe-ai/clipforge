@@ -1,7 +1,7 @@
 name: clipforge
 description: Editor video open source in stile CapCut, scritto in Flutter con FFmpeg.
 publish_to: "none"
-version: 0.5.0+5
+version: 0.6.0+6
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
