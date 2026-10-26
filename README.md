@@ -49,6 +49,10 @@ Flutter e usa FFmpeg per l'esportazione.
 
 - **Spot prodotto** (stile pubblicità), pensato per gli orologi ma valido per ogni oggetto. Carichi le foto e l'app trova l'oggetto e i suoi dettagli più ricchi (quadrante, lancette, logo, corona). Poi monta da sola un video con zoom macro, carrellate, leggere rotazioni, riflessi di luce che scorrono, colori da pubblicità, transizioni e testi di apertura e chiusura. Ci sono 3 stili (Lusso scuro, Sportivo, Minimal), 3 durate (15, 20 o 30 s) e i formati 9:16, 4:5 e 1:1. Il risultato si modifica come qualsiasi altro progetto.
 
+### Novità v0.7
+
+- **Spot IA con Higgsfield**: le riprese vengono generate dall'IA a partire dalle tue foto, con il modello Kling 3.0 image-to-video tramite l'API di Higgsfield. Per ogni foto indichi cosa mostra (intero, quadrante, logo, corona, fondello, cinturino, scatola). L'app scrive i prompt in stile pubblicità di lusso, genera una ripresa per foto, e con una foto sola fa un'unica richiesta a più inquadrature. Poi monta tutto con tagli secchi e il marchio in chiusura. Serve una chiave API di Higgsfield (cloud.higgsfield.ai, pagamento a consumo), da salvare con l'icona a forma di chiave.
+
 ## Avvio rapido
 
 Ti servono Flutter 3.27 o più recente, Android Studio e/o Xcode (per iOS

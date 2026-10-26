@@ -2,8 +2,12 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../models/project.dart';
+import '../services/ai_spot_service.dart';
+import '../services/ffmpeg_service.dart';
+import '../services/higgsfield_service.dart';
 import '../services/spot_service.dart';
 import '../state/history.dart';
+import '../widgets/ai_spot_sheet.dart';
 import '../widgets/spot_sheet.dart';
 import 'editor_screen.dart';
 
@@ -26,6 +30,66 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _reload() async {
     final p = await ProjectStore.load();
     if (mounted) setState(() => _last = p);
+  }
+
+  Future<void> _createAiSpot() async {
+    var key = await HiggsfieldKeyStore.load();
+    if (!mounted) return;
+    if (key == null) {
+      key = await showHiggsfieldKeySheet(context);
+      if (key == null || !mounted) return;
+    }
+    final res = await FilePicker.platform.pickFiles(type: FileType.image, allowMultiple: true);
+    final paths = res?.files.map((f) => f.path).whereType<String>().toList() ?? const <String>[];
+    if (paths.isEmpty || !mounted) return;
+    if (paths.length > 7) paths.removeRange(7, paths.length);
+    final req = await showAiSpotSheet(context, paths);
+    if (req == null || !mounted) return;
+
+    final state = ValueNotifier<(List<AiShot>, String)>((AiSpotService.plan(req.photos), 'Preparo…'));
+    var cancelled = false;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Spot IA'),
+        content: ValueListenableBuilder<(List<AiShot>, String)>(
+          valueListenable: state,
+          builder: (_, v, __) => AiSpotProgress(shots: v.$1, phase: v.$2),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              cancelled = true;
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Annulla'),
+          ),
+        ],
+      ),
+    );
+    try {
+      final service = AiSpotService(HiggsfieldClient(key), FFmpegService());
+      final project = await service.run(
+        req,
+        onUpdate: (shots, phase) => state.value = (List.of(shots), phase),
+        cancelled: () => cancelled,
+      );
+      if (!mounted || cancelled) return;
+      Navigator.of(context).pop();
+      final failed = state.value.$1.where((s) => s.file == null).length;
+      await _open(project, pick: false);
+      if (failed > 0 && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('$failed riprese non sono riuscite: lo spot usa quelle pronte.')));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      if (!cancelled) Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Spot IA non riuscito: $e')));
+    } finally {
+      state.dispose();
+    }
   }
 
   Future<void> _createSpot() async {
@@ -81,7 +145,14 @@ class _HomeScreenState extends State<HomeScreen> {
         child: ListView(
           padding: const EdgeInsets.all(24),
           children: [
-            const SizedBox(height: 24),
+            Align(
+              alignment: Alignment.centerRight,
+              child: IconButton(
+                tooltip: 'Chiave Higgsfield',
+                onPressed: () => showHiggsfieldKeySheet(context),
+                icon: const Icon(Icons.key_rounded),
+              ),
+            ),
             Icon(Icons.movie_filter_rounded, size: 52, color: accent),
             const SizedBox(height: 12),
             Text('ClipForge',
@@ -112,20 +183,44 @@ class _HomeScreenState extends State<HomeScreen> {
 
             const SizedBox(height: 12),
             Material(
+              borderRadius: BorderRadius.circular(18),
+              clipBehavior: Clip.antiAlias,
+              child: Ink(
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(colors: [Color(0xFF2B2416), Color(0xFF15161A)]),
+                ),
+                child: InkWell(
+                  onTap: _createAiSpot,
+                  child: const SizedBox(
+                    height: 84,
+                    child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      Icon(Icons.auto_awesome_rounded, size: 28, color: Color(0xFFE6C77A)),
+                      SizedBox(width: 10),
+                      Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('Spot IA', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                        Text('pubblicità da foto con Higgsfield', style: TextStyle(fontSize: 12, color: Colors.white60)),
+                      ]),
+                    ]),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Material(
               color: const Color(0xFF1C1D22),
               borderRadius: BorderRadius.circular(18),
               child: InkWell(
                 borderRadius: BorderRadius.circular(18),
                 onTap: _createSpot,
                 child: const SizedBox(
-                  height: 72,
+                  height: 60,
                   child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    Icon(Icons.watch_rounded, size: 28),
+                    Icon(Icons.watch_rounded, size: 24),
                     SizedBox(width: 10),
-                    Text('Spot prodotto', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+                    Text('Spot rapido', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
                     SizedBox(width: 8),
                     Flexible(
-                      child: Text('da foto, stile pubblicità',
+                      child: Text('senza IA, gratis',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(fontSize: 12, color: Colors.white54)),

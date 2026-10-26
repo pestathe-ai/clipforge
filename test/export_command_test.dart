@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:clipforge/models/project.dart';
 import 'package:clipforge/services/export_command.dart';
 import 'package:clipforge/services/spot_service.dart';
+import 'package:clipforge/services/ai_spot_service.dart';
+import 'package:clipforge/services/higgsfield_service.dart';
 import 'dart:typed_data';
 import 'package:flutter/material.dart' show Color;
 import 'package:flutter_test/flutter_test.dart';
@@ -177,6 +179,51 @@ void main() {
     expect(r[2], lessThan(70));
     expect(r.length, greaterThanOrEqualTo(7)); // almeno un dettaglio
     expect((r[4] - 90).abs(), lessThan(30));
+  });
+
+  test('Higgsfield: upload, invio, stato e piano delle riprese', () async {
+    final calls = <String>[];
+    var polls = 0;
+    Future<HttpReply> fake(String m, Uri u, Map<String, String> h, List<int>? body) async {
+      calls.add('$m ${u.path} ${h['Authorization'] ?? ''}');
+      if (u.path == '/files/generate-upload-url') {
+        return const HttpReply(200, '{"public_url":"https://cdn/x.png","upload_url":"https://up/x"}');
+      }
+      if (m == 'PUT') return const HttpReply(200, '');
+      if (u.path.endsWith('/image-to-video')) {
+        final j = jsonDecode(utf8.decode(body!)) as Map<String, dynamic>;
+        expect(j['image_url'], 'https://cdn/x.png');
+        expect(j['sound'], 'off');
+        expect((j['prompt'] as String).length, lessThanOrEqualTo(2500));
+        return const HttpReply(200, '{"status":"queued","request_id":"r1","status_url":"https://api.higgsfield.ai/requests/r1/status"}');
+      }
+      polls++;
+      return HttpReply(200, polls < 2 ? '{"status":"in_progress"}' : '{"status":"completed","video":{"url":"https://cdn/v.mp4"}}');
+    }
+
+    final dir = Directory.systemTemp.createTempSync();
+    final img = File('${dir.path}/a.png')..writeAsBytesSync([1, 2, 3]);
+    final c = HiggsfieldClient('id:secret', send: fake);
+    final url = await c.upload(img.path, 'image/png');
+    final st = await c.submit(AiSpotService.model, {
+      'prompt': '${AiSpotPrompts.style('Bulova')}\n\n${AiSpotPrompts.shot(ShotRole.dial)}',
+      'image_url': url,
+      'sound': 'off',
+      'duration': 3,
+    });
+    final video = await c.wait(st, every: Duration.zero);
+    expect(video, 'https://cdn/v.mp4');
+    expect(calls.first, contains('Key id:secret'));
+    expect(calls, contains('POST /kling-video/v3.0/std/image-to-video Key id:secret'));
+
+    // Piano: ordine macro → intero, una foto sola = multi-inquadratura.
+    final plan = AiSpotService.plan([('h', ShotRole.hero), ('c', ShotRole.crown), ('d', ShotRole.dial)]);
+    expect(plan.map((s) => s.role), [ShotRole.dial, ShotRole.crown, ShotRole.hero]);
+    expect(AiSpotService.plan([('h', ShotRole.hero)]).length, 1);
+    for (final s in AiSpotPrompts.multiShot()) {
+      expect((s['prompt'] as String).length, lessThanOrEqualTo(512));
+    }
+    expect(JobStatus.parse({'status': 'nsfw'}).state, JobState.nsfw);
   });
 
   test('progetto vuoto lancia un errore', () {
